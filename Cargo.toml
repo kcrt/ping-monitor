@@ -10,13 +10,16 @@ name = "PingMonitor"
 identifier = "net.kcrt.ping-monitor"
 version = "0.1.0"
 copyright = "Copyright (c) kcrt 2025. All rights reserved."
-category = "DeveloperTool"
-short_description = "A network connection monitoring application"
+category = "Utility"
+short_description = "Network connectivity monitoring with visual ping status"
 long_description = """
 PingMonitor is a simple network monitoring application that tracks network connectivity using ping.
 It features a clock-face visualization with 12 circles representing 5-second intervals,
 color-coded based on ping response times and success rates.
 """
+
+# Icon configuration
+icon = ["icons/icon-16.png", "icons/icon-32.png", "icons/icon-48.png", "icons/icon-64.png", "icons/icon-128.png", "icons/icon-256.png"]
 
 # macOS specific settings
 osx_frameworks = []
@@ -39,3 +42,4 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 dirs = "5.0"
 surge-ping = "0.8"
+image = "0.24"

@@ -90,7 +90,7 @@ pub struct PingStatistics {
 }
 
 #[derive(Debug, Clone)]
-struct DnsCacheEntry {
+pub struct DnsCacheEntry {
     ip_address: IpAddr,
     cached_at: SystemTime,
     ttl: Duration,
@@ -188,14 +188,14 @@ impl PingMonitorApp {
                         Ok(content) => {
                             match serde_json::from_str::<AppConfig>(&content) {
                                 Ok(config) => return config,
-                                Err(e) => eprintln!("Failed to parse config: {}", e),
+                                Err(e) => eprintln!("Failed to parse config: {e}"),
                             }
                         }
-                        Err(e) => eprintln!("Failed to read config file: {}", e),
+                        Err(e) => eprintln!("Failed to read config file: {e}"),
                     }
                 }
             }
-            Err(e) => eprintln!("Failed to get config path: {}", e),
+            Err(e) => eprintln!("Failed to get config path: {e}"),
         }
         AppConfig::default()
     }
@@ -212,47 +212,16 @@ impl PingMonitorApp {
                 match serde_json::to_string_pretty(&config) {
                     Ok(content) => {
                         if let Err(e) = fs::write(&path, content) {
-                            eprintln!("Failed to save config: {}", e);
+                            eprintln!("Failed to save config: {e}");
                         }
                     }
-                    Err(e) => eprintln!("Failed to serialize config: {}", e),
+                    Err(e) => eprintln!("Failed to serialize config: {e}"),
                 }
             }
-            Err(e) => eprintln!("Failed to get config path: {}", e),
+            Err(e) => eprintln!("Failed to get config path: {e}"),
         }
     }
 
-    async fn resolve_target_with_cache(dns_cache: &mut HashMap<String, DnsCacheEntry>, target: &str) -> Option<IpAddr> {
-        // First try to parse as direct IP address
-        if let Ok(ip) = target.parse::<IpAddr>() {
-            return Some(ip);
-        }
-
-        // Check if we have a valid cached entry
-        if let Some(cache_entry) = dns_cache.get(target) {
-            if !cache_entry.is_expired() {
-                return Some(cache_entry.ip_address);
-            } else {
-                // Remove expired entry
-                dns_cache.remove(target);
-            }
-        }
-
-        // Perform DNS lookup
-        match tokio::net::lookup_host(&format!("{}:80", target)).await {
-            Ok(mut addrs) => {
-                if let Some(addr) = addrs.next() {
-                    let ip = addr.ip();
-                    // Cache the result with 5-minute TTL
-                    dns_cache.insert(target.to_string(), DnsCacheEntry::new(ip, 300));
-                    Some(ip)
-                } else {
-                    None
-                }
-            }
-            Err(_) => None,
-        }
-    }
 
     fn resolve_and_ping_async(&mut self, target: String, _circle_index: usize, sender: mpsc::Sender<PingResult>) {
         let timestamp = SystemTime::now();
@@ -265,7 +234,7 @@ impl PingMonitorApp {
                     Ok(ip) => ip,
                     Err(_) => {
                         // Try to resolve hostname
-                        match tokio::net::lookup_host(&format!("{}:80", target)).await {
+                        match tokio::net::lookup_host(&format!("{target}:80")).await {
                             Ok(mut addrs) => {
                                 if let Some(addr) = addrs.next() {
                                     addr.ip()
@@ -638,7 +607,7 @@ impl eframe::App for PingMonitorApp {
             ui.label(format!("Mean Response Time: {:.1}ms", self.ping_statistics.mean_response_time));
             ui.label(format!("Last Response Time: {}", 
                 match self.last_response_time {
-                    Some(time) => format!("{:.1}ms", time),
+                    Some(time) => format!("{time:.1}ms"),
                     None => "N/A".to_string(),
                 }
             ));
