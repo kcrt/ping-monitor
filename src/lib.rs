@@ -1,19 +1,21 @@
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashMap};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::path::PathBuf;
 use std::fs;
 use eframe::egui;
 use egui::{Color32, Vec2, Pos2, Stroke};
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 use std::sync::mpsc;
 use std::thread;
+use surge_ping::{Client, Config, IcmpPacket, PingIdentifier, PingSequence};
+use std::net::IpAddr;
 
 #[derive(Debug, Clone)]
 pub struct PingResult {
     pub timestamp: SystemTime,
     pub response_time: Option<u64>,
     pub success: bool,
+    pub resolved_ip: Option<(String, IpAddr)>, // (hostname, ip) for caching
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -68,10 +70,10 @@ pub struct PingMonitorApp {
     pub circle_timestamps: [Option<SystemTime>; 12],
     pub last_ping_second: Option<u64>,
     pub ping_statistics: PingStatistics,
-    pub active_ping_circle: Option<usize>,
     pub ping_receiver: Option<mpsc::Receiver<PingResult>>,
     pub ping_sender: Option<mpsc::Sender<PingResult>>,
     pub pending_pings: std::collections::HashMap<usize, SystemTime>,
+    pub dns_cache: HashMap<String, DnsCacheEntry>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -82,6 +84,29 @@ pub struct PingStatistics {
     pub total_response_time: u64,
     pub loss_rate: f64,
     pub mean_response_time: f64,
+}
+
+#[derive(Debug, Clone)]
+struct DnsCacheEntry {
+    ip_address: IpAddr,
+    cached_at: SystemTime,
+    ttl: Duration,
+}
+
+impl DnsCacheEntry {
+    fn new(ip_address: IpAddr, ttl_seconds: u64) -> Self {
+        Self {
+            ip_address,
+            cached_at: SystemTime::now(),
+            ttl: Duration::from_secs(ttl_seconds),
+        }
+    }
+    
+    fn is_expired(&self) -> bool {
+        SystemTime::now()
+            .duration_since(self.cached_at)
+            .map_or(true, |elapsed| elapsed > self.ttl)
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -107,10 +132,10 @@ impl Default for PingMonitorApp {
             circle_timestamps: [None; 12],
             last_ping_second: None,
             ping_statistics: PingStatistics::default(),
-            active_ping_circle: None,
             ping_receiver: None,
             ping_sender: None,
-            pending_pings: std::collections::HashMap::new(),
+            pending_pings: HashMap::new(),
+            dns_cache: HashMap::new(),
         }
     }
 }
@@ -126,10 +151,10 @@ impl PingMonitorApp {
             circle_timestamps: [None; 12],
             last_ping_second: None,
             ping_statistics: PingStatistics::default(),
-            active_ping_circle: None,
             ping_receiver: None,
             ping_sender: None,
-            pending_pings: std::collections::HashMap::new(),
+            pending_pings: HashMap::new(),
+            dns_cache: HashMap::new(),
         }
     }
 
@@ -182,46 +207,110 @@ impl PingMonitorApp {
         }
     }
 
-    fn start_async_ping(&self, target: String, _circle_index: usize, sender: mpsc::Sender<PingResult>) {
+    async fn resolve_target_with_cache(dns_cache: &mut HashMap<String, DnsCacheEntry>, target: &str) -> Option<IpAddr> {
+        // First try to parse as direct IP address
+        if let Ok(ip) = target.parse::<IpAddr>() {
+            return Some(ip);
+        }
+
+        // Check if we have a valid cached entry
+        if let Some(cache_entry) = dns_cache.get(target) {
+            if !cache_entry.is_expired() {
+                return Some(cache_entry.ip_address);
+            } else {
+                // Remove expired entry
+                dns_cache.remove(target);
+            }
+        }
+
+        // Perform DNS lookup
+        match tokio::net::lookup_host(&format!("{}:80", target)).await {
+            Ok(mut addrs) => {
+                if let Some(addr) = addrs.next() {
+                    let ip = addr.ip();
+                    // Cache the result with 5-minute TTL
+                    dns_cache.insert(target.to_string(), DnsCacheEntry::new(ip, 300));
+                    Some(ip)
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        }
+    }
+
+    fn resolve_and_ping_async(&mut self, target: String, _circle_index: usize, sender: mpsc::Sender<PingResult>) {
         let timestamp = SystemTime::now();
         
         thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new().unwrap();
             let result = rt.block_on(async {
-                let output = if cfg!(target_os = "windows") {
-                    Command::new("ping")
-                        .args(&["-n", "1", "-w", "5000", &target])
-                        .output()
-                        .await
-                } else {
-                    Command::new("ping")
-                        .args(&["-c", "1", "-W", "5000", &target])
-                        .output()
-                        .await
-                };
-
-                match output {
-                    Ok(output) => {
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        if output.status.success() {
-                            let response_time = Self::parse_ping_time(&stdout);
-                            PingResult {
-                                timestamp,
-                                response_time,
-                                success: true,
+                // Parse target as IP address or resolve hostname
+                let target_ip: IpAddr = match target.parse() {
+                    Ok(ip) => ip,
+                    Err(_) => {
+                        // Try to resolve hostname
+                        match tokio::net::lookup_host(&format!("{}:80", target)).await {
+                            Ok(mut addrs) => {
+                                if let Some(addr) = addrs.next() {
+                                    addr.ip()
+                                } else {
+                                    return PingResult {
+                                        timestamp,
+                                        response_time: None,
+                                        success: false,
+                                        resolved_ip: None,
+                                    };
+                                }
                             }
-                        } else {
-                            PingResult {
+                            Err(_) => return PingResult {
                                 timestamp,
                                 response_time: None,
                                 success: false,
+                                resolved_ip: None,
+                            },
+                        }
+                    }
+                };
+
+                let config = Config::default();
+                let client = Client::new(&config);
+                
+                match client {
+                    Ok(client) => {
+                        let mut pinger = client.pinger(target_ip, PingIdentifier(1)).await;
+                        pinger.timeout(Duration::from_secs(5));
+                        
+                        match pinger.ping(PingSequence(1), &[]).await {
+                            Ok((IcmpPacket::V4(_packet), duration)) => {
+                                PingResult {
+                                    timestamp,
+                                    response_time: Some(duration.as_millis() as u64),
+                                    success: true,
+                                    resolved_ip: Some((target.clone(), target_ip)),
+                                }
                             }
+                            Ok((IcmpPacket::V6(_packet), duration)) => {
+                                PingResult {
+                                    timestamp,
+                                    response_time: Some(duration.as_millis() as u64),
+                                    success: true,
+                                    resolved_ip: Some((target.clone(), target_ip)),
+                                }
+                            }
+                            Err(_) => PingResult {
+                                timestamp,
+                                response_time: None,
+                                success: false,
+                                resolved_ip: None,
+                            },
                         }
                     }
                     Err(_) => PingResult {
                         timestamp,
                         response_time: None,
                         success: false,
+                        resolved_ip: None,
                     },
                 }
             });
@@ -230,35 +319,59 @@ impl PingMonitorApp {
         });
     }
 
-    fn parse_ping_time(output: &str) -> Option<u64> {
-        if cfg!(target_os = "windows") {
-            if let Some(line) = output.lines().find(|line| line.contains("time=") || line.contains("time<")) {
-                if let Some(start) = line.find("time") {
-                    let time_part = &line[start..];
-                    if let Some(eq_pos) = time_part.find('=') {
-                        let after_eq = &time_part[eq_pos + 1..];
-                        if let Some(ms_pos) = after_eq.find("ms") {
-                            let time_str = &after_eq[..ms_pos];
-                            return time_str.trim().parse::<u64>().ok();
+    fn start_async_ping_with_ip(&self, target_ip: IpAddr, _circle_index: usize, sender: mpsc::Sender<PingResult>) {
+        let timestamp = SystemTime::now();
+        
+        thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let result = rt.block_on(async {
+
+                let config = Config::default();
+                let client = Client::new(&config);
+                
+                match client {
+                    Ok(client) => {
+                        let mut pinger = client.pinger(target_ip, PingIdentifier(1)).await;
+                        pinger.timeout(Duration::from_secs(5));
+                        
+                        match pinger.ping(PingSequence(1), &[]).await {
+                            Ok((IcmpPacket::V4(_packet), duration)) => {
+                                PingResult {
+                                    timestamp,
+                                    response_time: Some(duration.as_millis() as u64),
+                                    success: true,
+                                    resolved_ip: None, // This function uses pre-resolved IP
+                                }
+                            }
+                            Ok((IcmpPacket::V6(_packet), duration)) => {
+                                PingResult {
+                                    timestamp,
+                                    response_time: Some(duration.as_millis() as u64),
+                                    success: true,
+                                    resolved_ip: None, // This function uses pre-resolved IP
+                                }
+                            }
+                            Err(_) => PingResult {
+                                timestamp,
+                                response_time: None,
+                                success: false,
+                                resolved_ip: None,
+                            },
                         }
-                    } else if time_part.contains("time<") {
-                        return Some(1);
                     }
+                    Err(_) => PingResult {
+                        timestamp,
+                        response_time: None,
+                        success: false,
+                        resolved_ip: None,
+                    },
                 }
-            }
-        } else {
-            if let Some(line) = output.lines().find(|line| line.contains("time=")) {
-                if let Some(start) = line.find("time=") {
-                    let time_part = &line[start + 5..];
-                    if let Some(space_pos) = time_part.find(' ') {
-                        let time_str = &time_part[..space_pos];
-                        return time_str.parse::<f64>().ok().map(|t| t as u64);
-                    }
-                }
-            }
-        }
-        None
+            });
+            
+            let _ = sender.send(result);
+        });
     }
+
 
     fn get_circle_color(ping_result: &PingResult) -> CircleColor {
         if !ping_result.success {
@@ -390,6 +503,13 @@ impl eframe::App for PingMonitorApp {
             self.circles[circle_index] = Self::get_circle_color(&ping_result);
             self.circle_timestamps[circle_index] = Some(ping_result.timestamp);
             
+            // Update DNS cache if we have resolution info
+            if let Some((hostname, ip)) = &ping_result.resolved_ip {
+                if hostname != &ip.to_string() { // Only cache actual hostnames, not IP addresses
+                    self.dns_cache.insert(hostname.clone(), DnsCacheEntry::new(*ip, 300)); // 5-minute TTL
+                }
+            }
+            
             self.ping_results.push_back(ping_result);
             
             if self.ping_results.len() > 60 {
@@ -433,9 +553,31 @@ impl eframe::App for PingMonitorApp {
                     
                     // Start the ping using the existing sender
                     if let Some(sender) = &self.ping_sender {
-                        self.start_async_ping(self.target.clone(), circle_index, sender.clone());
-                        self.pending_pings.insert(circle_index, now);
-                        self.last_ping_second = Some(current_5sec_boundary);
+                        // Resolve target with DNS caching
+                        let target = self.target.clone();
+                        let sender_clone = sender.clone();
+                        let cache_entry = self.dns_cache.get(&target);
+                        
+                        // Check if we have a valid cached IP
+                        if let Some(entry) = cache_entry {
+                            if !entry.is_expired() {
+                                // Use cached IP
+                                self.start_async_ping_with_ip(entry.ip_address, circle_index, sender_clone);
+                                self.pending_pings.insert(circle_index, now);
+                                self.last_ping_second = Some(current_5sec_boundary);
+                            } else {
+                                // Cache expired, remove it and resolve again
+                                self.dns_cache.remove(&target);
+                                self.resolve_and_ping_async(target, circle_index, sender_clone);
+                                self.pending_pings.insert(circle_index, now);
+                                self.last_ping_second = Some(current_5sec_boundary);
+                            }
+                        } else {
+                            // No cache entry, need to resolve
+                            self.resolve_and_ping_async(target, circle_index, sender_clone);
+                            self.pending_pings.insert(circle_index, now);
+                            self.last_ping_second = Some(current_5sec_boundary);
+                        }
                     }
                 }
             }

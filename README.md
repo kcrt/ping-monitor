@@ -11,6 +11,7 @@ A cross-platform GUI network monitoring application built with Rust and egui tha
   - 🟠 Orange: Response time > 200ms
   - 🔴 Red: Failed ping
   - ⚫ Gray: No data or expired (after 55 seconds)
+- **DNS Caching**: Intelligent DNS resolution caching with 5-minute TTL to reduce network overhead
 - **Real-time Statistics**: Success rate, loss rate, and mean response time
 - **Persistent Configuration**: Automatically saves and loads ping target
 - **Cross-Platform**: Works on Windows, macOS, and Linux
@@ -49,7 +50,8 @@ cargo run
 
 ### Architecture
 - **Frontend**: egui/eframe for cross-platform GUI
-- **Ping Logic**: Cross-platform ping command execution
+- **Ping Logic**: surge-ping library for ICMP ping functionality
+- **DNS Resolution**: Built-in DNS caching with configurable TTL
 - **Data Management**: Rolling buffer of 60 ping results
 - **Configuration**: JSON-based persistent storage
 
@@ -60,6 +62,7 @@ cargo run
 
 ### Key Behaviors
 - Pings occur every 5 seconds at real-world boundaries (0, 5, 10, 15... seconds)
+- DNS resolution is cached for 5 minutes to minimize network overhead
 - Circle colors age over time with gradual fading
 - Statistics are calculated from the last 60 seconds of data
 - UI refreshes at 20 FPS for smooth animations
@@ -68,6 +71,7 @@ cargo run
 ## Dependencies
 
 - **egui/eframe**: GUI framework
+- **surge-ping**: ICMP ping implementation
 - **chrono**: Date and time handling
 - **serde/serde_json**: Configuration serialization
 - **dirs**: Platform-specific directory paths
