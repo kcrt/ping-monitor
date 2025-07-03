@@ -1,0 +1,21 @@
+I want to create new GUI application to monitor network connection using ping.
+The application uses egui like in `~/prog/mypomodoro/`.
+
+In the form, there are 12 solid circles located in the place like a hour indigator on a clock face.
+Each circle represents a 5-seconds interval, and the color of the circle changes based on the last ping result:
+- Green: Ping successful (less than 100ms)
+- Yellow: Ping successful but slow (between 100ms and 200ms)
+- Orange: Ping very slow (between 200ms+)
+- Red: Ping failed (timeout or unreachable)
+- Gray: No ping data available
+
+The application should have the following features:
+1. A button to start/stop the ping monitoring.
+2. A text box to enter the IP address or hostname to ping.
+3. A label to display the current ping result. (mean ping time and loss rate)
+
+First time the application is started, all circles are gray color, indicating no ping data available.
+After clicking the start button, the application begins pinging the specified IP address or hostname every 5 seconds and updates the circles accordingly.
+Every 5 seconds of system time (like 00:00:00 = circle at 12 o'clock, 00:00:05 = circle at 1 o'clock, 00:00:10 = circle at 2 o'clock, ...), the application pings the specified IP address or hostname and updates the corresponding circle color based on the ping result.
+
+Please create the code for this application using Rust and egui.

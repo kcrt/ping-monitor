@@ -1,0 +1,40 @@
+[package]
+name = "ping-monitor"
+version = "0.1.0"
+edition = "2024"
+description = "A network connection monitoring application using ping"
+authors = ["kcrt <kcrt@kcrt.net>"]
+
+[package.metadata.bundle]
+name = "PingMonitor"
+identifier = "net.kcrt.ping-monitor"
+version = "0.1.0"
+copyright = "Copyright (c) kcrt 2025. All rights reserved."
+category = "DeveloperTool"
+short_description = "A network connection monitoring application"
+long_description = """
+PingMonitor is a simple network monitoring application that tracks network connectivity using ping.
+It features a clock-face visualization with 12 circles representing 5-second intervals,
+color-coded based on ping response times and success rates.
+"""
+
+# macOS specific settings
+osx_frameworks = []
+osx_minimum_system_version = "10.13"
+
+# Windows specific settings
+windows_subsystem = "windows"
+
+# Deb specific settings (for Linux)
+deb_depends = []
+
+
+[dependencies]
+chrono = "0.4.41"
+eframe = "0.31.1"
+egui = "0.31.1"
+env_logger = "0.11.8"
+tokio = { version = "1.0", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+dirs = "5.0"
