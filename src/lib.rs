@@ -1,11 +1,13 @@
 use std::collections::VecDeque;
-use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::path::PathBuf;
 use std::fs;
 use eframe::egui;
 use egui::{Color32, Vec2, Pos2, Stroke};
 use serde::{Deserialize, Serialize};
+use tokio::process::Command;
+use std::sync::mpsc;
+use std::thread;
 
 #[derive(Debug, Clone)]
 pub struct PingResult {
@@ -67,6 +69,9 @@ pub struct PingMonitorApp {
     pub last_ping_second: Option<u64>,
     pub ping_statistics: PingStatistics,
     pub active_ping_circle: Option<usize>,
+    pub ping_receiver: Option<mpsc::Receiver<PingResult>>,
+    pub ping_sender: Option<mpsc::Sender<PingResult>>,
+    pub pending_pings: std::collections::HashMap<usize, SystemTime>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -103,6 +108,9 @@ impl Default for PingMonitorApp {
             last_ping_second: None,
             ping_statistics: PingStatistics::default(),
             active_ping_circle: None,
+            ping_receiver: None,
+            ping_sender: None,
+            pending_pings: std::collections::HashMap::new(),
         }
     }
 }
@@ -119,6 +127,9 @@ impl PingMonitorApp {
             last_ping_second: None,
             ping_statistics: PingStatistics::default(),
             active_ping_circle: None,
+            ping_receiver: None,
+            ping_sender: None,
+            pending_pings: std::collections::HashMap::new(),
         }
     }
 
@@ -171,43 +182,52 @@ impl PingMonitorApp {
         }
     }
 
-    fn perform_ping(&self, target: &str) -> PingResult {
+    fn start_async_ping(&self, target: String, _circle_index: usize, sender: mpsc::Sender<PingResult>) {
         let timestamp = SystemTime::now();
         
-        let output = if cfg!(target_os = "windows") {
-            Command::new("ping")
-                .args(&["-n", "1", "-w", "5000", target])
-                .output()
-        } else {
-            Command::new("ping")
-                .args(&["-c", "1", "-W", "5000", target])
-                .output()
-        };
-
-        match output {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if output.status.success() {
-                    let response_time = Self::parse_ping_time(&stdout);
-                    PingResult {
-                        timestamp,
-                        response_time,
-                        success: true,
-                    }
+        thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let result = rt.block_on(async {
+                let output = if cfg!(target_os = "windows") {
+                    Command::new("ping")
+                        .args(&["-n", "1", "-w", "5000", &target])
+                        .output()
+                        .await
                 } else {
-                    PingResult {
+                    Command::new("ping")
+                        .args(&["-c", "1", "-W", "5000", &target])
+                        .output()
+                        .await
+                };
+
+                match output {
+                    Ok(output) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        if output.status.success() {
+                            let response_time = Self::parse_ping_time(&stdout);
+                            PingResult {
+                                timestamp,
+                                response_time,
+                                success: true,
+                            }
+                        } else {
+                            PingResult {
+                                timestamp,
+                                response_time: None,
+                                success: false,
+                            }
+                        }
+                    }
+                    Err(_) => PingResult {
                         timestamp,
                         response_time: None,
                         success: false,
-                    }
+                    },
                 }
-            }
-            Err(_) => PingResult {
-                timestamp,
-                response_time: None,
-                success: false,
-            },
-        }
+            });
+            
+            let _ = sender.send(result);
+        });
     }
 
     fn parse_ping_time(output: &str) -> Option<u64> {
@@ -302,12 +322,16 @@ impl PingMonitorApp {
         
         let painter = ui.painter();
         
+        fn place_in_circle(center: Pos2, radius: f32, angle: f32) -> Pos2 {
+            Pos2::new(
+                center.x + radius * angle.cos(),
+                center.y + radius * angle.sin(),
+            )
+        }
+
         for i in 0..12 {
             let angle = (i as f32 * 30.0 - 90.0) * std::f32::consts::PI / 180.0;
-            let x = center.x + radius * angle.cos();
-            let y = center.y + radius * angle.sin();
-            let pos = Pos2::new(x, y);
-            
+            let pos = place_in_circle(center, radius, angle);
             let color = if let Some(timestamp) = self.circle_timestamps[i] {
                 if let Ok(elapsed) = SystemTime::now().duration_since(timestamp) {
                     let elapsed_seconds = elapsed.as_secs_f64();
@@ -320,7 +344,7 @@ impl PingMonitorApp {
             };
             painter.circle_filled(pos, circle_radius, color);
             
-            let stroke_color = if self.active_ping_circle == Some(i) {
+            let stroke_color = if self.pending_pings.contains_key(&i) {
                 Color32::RED
             } else {
                 Color32::BLACK
@@ -328,8 +352,10 @@ impl PingMonitorApp {
             painter.circle_stroke(pos, circle_radius, Stroke::new(2.0, stroke_color));
             
             let text = format!("{}", i * 5);
-            let text_pos = Pos2::new(x, y + circle_radius + 15.0);
-            painter.text(text_pos, egui::Align2::CENTER_CENTER, text, egui::FontId::default(), Color32::BLACK);
+            let text_pos = place_in_circle(center, radius - 25.0, angle);
+            let font_size = 12.0;
+            let font = egui::FontId::monospace(font_size);
+            painter.text(text_pos, egui::Align2::CENTER_CENTER, text, font, ui.visuals().text_color());
         }
         
         let now = SystemTime::now();
@@ -350,8 +376,40 @@ impl PingMonitorApp {
 impl eframe::App for PingMonitorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let previous_target = self.target.clone();
+        
+        // Handle incoming ping results
+        let mut ping_results_to_process = Vec::new();
+        if let Some(receiver) = &self.ping_receiver {
+            while let Ok(ping_result) = receiver.try_recv() {
+                ping_results_to_process.push(ping_result);
+            }
+        }
+        
+        for ping_result in ping_results_to_process {
+            let circle_index = Self::get_circle_index_for_time(ping_result.timestamp);
+            self.circles[circle_index] = Self::get_circle_color(&ping_result);
+            self.circle_timestamps[circle_index] = Some(ping_result.timestamp);
+            
+            self.ping_results.push_back(ping_result);
+            
+            if self.ping_results.len() > 60 {
+                self.ping_results.pop_front();
+            }
+            
+            self.update_statistics();
+            
+            // Remove from pending pings
+            self.pending_pings.remove(&circle_index);
+        }
+        
+        // Clean up old pending pings (timeout after 10 seconds)
+        let now = SystemTime::now();
+        let timeout_duration = Duration::from_secs(10);
+        self.pending_pings.retain(|_, &mut timestamp| {
+            now.duration_since(timestamp).unwrap_or(Duration::from_secs(0)) < timeout_duration
+        });
+        
         if self.is_monitoring {
-            let now = SystemTime::now();
             let duration = now.duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0));
             let current_second = duration.as_secs();
             let current_5sec_boundary = (current_second / 5) * 5;
@@ -363,21 +421,23 @@ impl eframe::App for PingMonitorApp {
 
             if should_ping {
                 let circle_index = Self::get_circle_index_for_time(now);
-                self.active_ping_circle = Some(circle_index);
                 
-                let ping_result = self.perform_ping(&self.target);
-                self.circles[circle_index] = Self::get_circle_color(&ping_result);
-                self.circle_timestamps[circle_index] = Some(ping_result.timestamp);
-                
-                self.ping_results.push_back(ping_result);
-                
-                if self.ping_results.len() > 60 {
-                    self.ping_results.pop_front();
+                // Only start a new ping if we're not already pinging this circle
+                if !self.pending_pings.contains_key(&circle_index) {
+                    // Initialize channel if needed
+                    if self.ping_receiver.is_none() {
+                        let (sender, receiver) = mpsc::channel();
+                        self.ping_receiver = Some(receiver);
+                        self.ping_sender = Some(sender);
+                    }
+                    
+                    // Start the ping using the existing sender
+                    if let Some(sender) = &self.ping_sender {
+                        self.start_async_ping(self.target.clone(), circle_index, sender.clone());
+                        self.pending_pings.insert(circle_index, now);
+                        self.last_ping_second = Some(current_5sec_boundary);
+                    }
                 }
-                
-                self.update_statistics();
-                self.last_ping_second = Some(current_5sec_boundary);
-                self.active_ping_circle = None;
             }
         }
 
@@ -400,7 +460,6 @@ impl eframe::App for PingMonitorApp {
             
             ui.separator();
             
-            ui.label(format!("Total Pings: {}", self.ping_statistics.total_pings));
             ui.label(format!("Success Rate: {:.1}%", 100.0 - self.ping_statistics.loss_rate));
             ui.label(format!("Loss Rate: {:.1}%", self.ping_statistics.loss_rate));
             ui.label(format!("Mean Response Time: {:.1}ms", self.ping_statistics.mean_response_time));
