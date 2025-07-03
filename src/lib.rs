@@ -13,7 +13,7 @@ use std::net::IpAddr;
 #[derive(Debug, Clone)]
 pub struct PingResult {
     pub timestamp: SystemTime,
-    pub response_time: Option<u64>,
+    pub response_time: Option<f64>,
     pub success: bool,
     pub resolved_ip: Option<(String, IpAddr)>, // (hostname, ip) for caching
 }
@@ -74,6 +74,9 @@ pub struct PingMonitorApp {
     pub ping_sender: Option<mpsc::Sender<PingResult>>,
     pub pending_pings: std::collections::HashMap<usize, SystemTime>,
     pub dns_cache: HashMap<String, DnsCacheEntry>,
+    pub green_threshold: u64,
+    pub yellow_threshold: u64,
+    pub last_response_time: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -81,7 +84,7 @@ pub struct PingStatistics {
     pub total_pings: u64,
     pub successful_pings: u64,
     pub failed_pings: u64,
-    pub total_response_time: u64,
+    pub total_response_time: f64,
     pub loss_rate: f64,
     pub mean_response_time: f64,
 }
@@ -112,12 +115,16 @@ impl DnsCacheEntry {
 #[derive(Debug, Serialize, Deserialize)]
 struct AppConfig {
     target: String,
+    green_threshold: u64,
+    yellow_threshold: u64,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             target: "8.8.8.8".to_string(),
+            green_threshold: 100,
+            yellow_threshold: 200,
         }
     }
 }
@@ -136,6 +143,9 @@ impl Default for PingMonitorApp {
             ping_sender: None,
             pending_pings: HashMap::new(),
             dns_cache: HashMap::new(),
+            green_threshold: 100,
+            yellow_threshold: 200,
+            last_response_time: None,
         }
     }
 }
@@ -155,6 +165,9 @@ impl PingMonitorApp {
             ping_sender: None,
             pending_pings: HashMap::new(),
             dns_cache: HashMap::new(),
+            green_threshold: config.green_threshold,
+            yellow_threshold: config.yellow_threshold,
+            last_response_time: None,
         }
     }
 
@@ -190,6 +203,8 @@ impl PingMonitorApp {
     fn save_config(&self) {
         let config = AppConfig {
             target: self.target.clone(),
+            green_threshold: self.green_threshold,
+            yellow_threshold: self.yellow_threshold,
         };
 
         match Self::get_config_path() {
@@ -285,7 +300,7 @@ impl PingMonitorApp {
                             Ok((IcmpPacket::V4(_packet), duration)) => {
                                 PingResult {
                                     timestamp,
-                                    response_time: Some(duration.as_millis() as u64),
+                                    response_time: Some(duration.as_secs_f64() * 1000.0),
                                     success: true,
                                     resolved_ip: Some((target.clone(), target_ip)),
                                 }
@@ -293,7 +308,7 @@ impl PingMonitorApp {
                             Ok((IcmpPacket::V6(_packet), duration)) => {
                                 PingResult {
                                     timestamp,
-                                    response_time: Some(duration.as_millis() as u64),
+                                    response_time: Some(duration.as_secs_f64() * 1000.0),
                                     success: true,
                                     resolved_ip: Some((target.clone(), target_ip)),
                                 }
@@ -338,7 +353,7 @@ impl PingMonitorApp {
                             Ok((IcmpPacket::V4(_packet), duration)) => {
                                 PingResult {
                                     timestamp,
-                                    response_time: Some(duration.as_millis() as u64),
+                                    response_time: Some(duration.as_secs_f64() * 1000.0),
                                     success: true,
                                     resolved_ip: None, // This function uses pre-resolved IP
                                 }
@@ -346,7 +361,7 @@ impl PingMonitorApp {
                             Ok((IcmpPacket::V6(_packet), duration)) => {
                                 PingResult {
                                     timestamp,
-                                    response_time: Some(duration.as_millis() as u64),
+                                    response_time: Some(duration.as_secs_f64() * 1000.0),
                                     success: true,
                                     resolved_ip: None, // This function uses pre-resolved IP
                                 }
@@ -373,16 +388,16 @@ impl PingMonitorApp {
     }
 
 
-    fn get_circle_color(ping_result: &PingResult) -> CircleColor {
+    fn get_circle_color(&self, ping_result: &PingResult) -> CircleColor {
         if !ping_result.success {
             return CircleColor::Red;
         }
         
         match ping_result.response_time {
             Some(time) => {
-                if time < 100 {
+                if time < self.green_threshold as f64 {
                     CircleColor::Green
-                } else if time < 200 {
+                } else if time < self.yellow_threshold as f64 {
                     CircleColor::Yellow
                 } else {
                     CircleColor::Orange
@@ -406,7 +421,7 @@ impl PingMonitorApp {
         let successful = recent_results.iter().filter(|r| r.success).count() as u64;
         let failed = total - successful;
         
-        let total_response_time: u64 = recent_results
+        let total_response_time: f64 = recent_results
             .iter()
             .filter_map(|r| r.response_time)
             .sum();
@@ -417,7 +432,7 @@ impl PingMonitorApp {
             failed_pings: failed,
             total_response_time,
             loss_rate: if total > 0 { (failed as f64 / total as f64) * 100.0 } else { 0.0 },
-            mean_response_time: if successful > 0 { total_response_time as f64 / successful as f64 } else { 0.0 },
+            mean_response_time: if successful > 0 { total_response_time / successful as f64 } else { 0.0 },
         };
     }
 
@@ -489,6 +504,8 @@ impl PingMonitorApp {
 impl eframe::App for PingMonitorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let previous_target = self.target.clone();
+        let previous_green = self.green_threshold;
+        let previous_yellow = self.yellow_threshold;
         
         // Handle incoming ping results
         let mut ping_results_to_process = Vec::new();
@@ -500,8 +517,11 @@ impl eframe::App for PingMonitorApp {
         
         for ping_result in ping_results_to_process {
             let circle_index = Self::get_circle_index_for_time(ping_result.timestamp);
-            self.circles[circle_index] = Self::get_circle_color(&ping_result);
+            self.circles[circle_index] = self.get_circle_color(&ping_result);
             self.circle_timestamps[circle_index] = Some(ping_result.timestamp);
+            
+            // Update last response time
+            self.last_response_time = ping_result.response_time;
             
             // Update DNS cache if we have resolution info
             if let Some((hostname, ip)) = &ping_result.resolved_ip {
@@ -587,8 +607,19 @@ impl eframe::App for PingMonitorApp {
             ui.heading("Ping Monitor");
             
             ui.horizontal(|ui| {
-                ui.label("Target:");
-                ui.text_edit_singleline(&mut self.target);
+                ui.label("Target (IP or hostname):");
+                ui.add_enabled(!self.is_monitoring, egui::TextEdit::singleline(&mut self.target));
+            });
+            
+            ui.label("Time Thresholds:");
+            ui.horizontal(|ui| {
+                ui.label("Green < ");
+                ui.add(egui::DragValue::new(&mut self.green_threshold).range(1..=1000));
+                ui.label("[ms]");
+                ui.label("≤ Yellow <");
+                ui.add(egui::DragValue::new(&mut self.yellow_threshold).range(1..=2000));
+                ui.label("[ms]");
+                ui.label("≤ Orange");
             });
             
             ui.horizontal(|ui| {
@@ -605,6 +636,12 @@ impl eframe::App for PingMonitorApp {
             ui.label(format!("Success Rate: {:.1}%", 100.0 - self.ping_statistics.loss_rate));
             ui.label(format!("Loss Rate: {:.1}%", self.ping_statistics.loss_rate));
             ui.label(format!("Mean Response Time: {:.1}ms", self.ping_statistics.mean_response_time));
+            ui.label(format!("Last Response Time: {}", 
+                match self.last_response_time {
+                    Some(time) => format!("{:.1}ms", time),
+                    None => "N/A".to_string(),
+                }
+            ));
 
             ui.separator();
             
@@ -617,7 +654,7 @@ impl eframe::App for PingMonitorApp {
             
         });
         
-        if previous_target != self.target {
+        if previous_target != self.target || previous_green != self.green_threshold || previous_yellow != self.yellow_threshold {
             self.save_config();
         }
         

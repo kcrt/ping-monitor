@@ -2,6 +2,8 @@
 
 A cross-platform GUI network monitoring application built with Rust and egui that tracks network connectivity using ping commands. The application visualizes ping results in an intuitive clock-face format with color-coded status indicators.
 
+![PingMonitor Screenshot](screenshot.png)
+
 ## Features
 
 - **Clock-Face Visualization**: 12 circles positioned at clock positions representing 5-second intervals over a 60-second cycle
