@@ -7,10 +7,10 @@ A cross-platform GUI network monitoring application built with Rust and egui tha
 ## Features
 
 - **Clock-Face Visualization**: 12 circles positioned at clock positions representing 5-second intervals over a 60-second cycle
-- **Color-Coded Status**: 
-  - 🟢 Green: Response time < 100ms
-  - 🟡 Yellow: Response time 100-200ms
-  - 🟠 Orange: Response time > 200ms
+- **Color-Coded Status** (configurable thresholds): 
+  - 🟢 Green: Response time < 100ms (default)
+  - 🟡 Yellow: Response time 100-200ms (default)
+  - 🟠 Orange: Response time > 200ms (default)
   - 🔴 Red: Failed ping
   - ⚫ Gray: No data or expired (after 55 seconds)
 - **DNS Caching**: Intelligent DNS resolution caching with 5-minute TTL to reduce network overhead
