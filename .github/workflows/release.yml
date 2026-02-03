@@ -187,7 +187,7 @@ jobs:
           
           # Create ZIP archive preserving permissions
           cd artifacts
-          zip "../${ARTIFACT_NAME}.zip" ping-monitor
+          zip -ry "../${ARTIFACT_NAME}.zip" ping-monitor
           cd ..
           
           echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
