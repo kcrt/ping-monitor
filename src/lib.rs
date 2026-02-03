@@ -1,133 +1,47 @@
+mod config;
+mod ping;
+mod dns_cache;
+mod ping_executor;
+mod circle_color;
+
 use std::collections::{VecDeque, HashMap};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::path::PathBuf;
-use std::fs;
 use eframe::egui;
 use egui::{Color32, Vec2, Pos2, Stroke};
-use serde::{Deserialize, Serialize};
 use std::sync::mpsc;
-use std::thread;
-use surge_ping::{Client, Config, IcmpPacket, PingIdentifier, PingSequence};
-use std::net::IpAddr;
 
-#[derive(Debug, Clone)]
-pub struct PingResult {
-    pub timestamp: SystemTime,
-    pub response_time: Option<f64>,
-    pub success: bool,
-    pub resolved_ip: Option<(String, IpAddr)>, // (hostname, ip) for caching
-}
+use config::AppConfig;
+use ping::{PingResult, PingStatistics};
+use dns_cache::{DnsCache, DnsCacheEntry};
+use ping_executor::PingExecutor;
+use circle_color::CircleColor;
 
-#[derive(Debug, Clone, Copy)]
-pub enum CircleColor {
-    Gray,
-    Green,
-    Yellow,
-    Orange,
-    Red,
-}
-
-impl CircleColor {
-    fn to_color32(self) -> Color32 {
-        match self {
-            CircleColor::Gray => Color32::GRAY,
-            CircleColor::Green => Color32::GREEN,
-            CircleColor::Yellow => Color32::YELLOW,
-            CircleColor::Orange => Color32::from_rgb(255, 165, 0),
-            CircleColor::Red => Color32::RED,
-        }
-    }
-    
-    fn to_color32_with_age(self, elapsed_seconds: f64) -> Color32 {
-        if elapsed_seconds >= 55.0 {
-            return Color32::GRAY;
-        }
-        
-        let base_color = self.to_color32();
-        
-        if elapsed_seconds <= 35.0 {
-            return base_color;
-        }
-        
-        // Fade from full color to gray between 35-55 seconds
-        let fade_factor = 1.0 - (elapsed_seconds - 35.0) / 20.0;
-        let fade_factor = fade_factor.clamp(0.0, 1.0) as f32;
-        
-        let gray = Color32::GRAY;
-        Color32::from_rgb(
-            (base_color.r() as f32 * fade_factor + gray.r() as f32 * (1.0 - fade_factor)) as u8,
-            (base_color.g() as f32 * fade_factor + gray.g() as f32 * (1.0 - fade_factor)) as u8,
-            (base_color.b() as f32 * fade_factor + gray.b() as f32 * (1.0 - fade_factor)) as u8,
-        )
-    }
-}
+// Constants
+const PING_INTERVAL_SECS: u64 = 5;
+const MAX_PING_RESULTS: usize = 60;
+const STATISTICS_WINDOW_SECS: u64 = 60;
+const PENDING_PING_TIMEOUT_SECS: u64 = 10;
+const DNS_CACHE_TTL_SECS: u64 = 300;
+const NUM_CIRCLES: usize = 12;
 
 pub struct PingMonitorApp {
     pub target: String,
     pub is_monitoring: bool,
     pub ping_results: VecDeque<PingResult>,
-    pub circles: [CircleColor; 12],
-    pub circle_timestamps: [Option<SystemTime>; 12],
+    pub circles: [CircleColor; NUM_CIRCLES],
+    pub circle_timestamps: [Option<SystemTime>; NUM_CIRCLES],
     pub last_ping_second: Option<u64>,
     pub ping_statistics: PingStatistics,
     pub ping_receiver: Option<mpsc::Receiver<PingResult>>,
     pub ping_sender: Option<mpsc::Sender<PingResult>>,
-    pub pending_pings: std::collections::HashMap<usize, SystemTime>,
-    pub dns_cache: HashMap<String, DnsCacheEntry>,
+    pub pending_pings: HashMap<usize, SystemTime>,
+    pub dns_cache: DnsCache,
     pub green_threshold: u64,
     pub yellow_threshold: u64,
     pub last_response_time: Option<f64>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct PingStatistics {
-    pub total_pings: u64,
-    pub successful_pings: u64,
-    pub failed_pings: u64,
-    pub total_response_time: f64,
-    pub loss_rate: f64,
-    pub mean_response_time: f64,
-}
 
-#[derive(Debug, Clone)]
-pub struct DnsCacheEntry {
-    ip_address: IpAddr,
-    cached_at: SystemTime,
-    ttl: Duration,
-}
-
-impl DnsCacheEntry {
-    fn new(ip_address: IpAddr, ttl_seconds: u64) -> Self {
-        Self {
-            ip_address,
-            cached_at: SystemTime::now(),
-            ttl: Duration::from_secs(ttl_seconds),
-        }
-    }
-    
-    fn is_expired(&self) -> bool {
-        SystemTime::now()
-            .duration_since(self.cached_at)
-            .map_or(true, |elapsed| elapsed > self.ttl)
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct AppConfig {
-    target: String,
-    green_threshold: u64,
-    yellow_threshold: u64,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            target: "8.8.8.8".to_string(),
-            green_threshold: 100,
-            yellow_threshold: 200,
-        }
-    }
-}
 
 impl Default for PingMonitorApp {
     fn default() -> Self {
@@ -135,14 +49,14 @@ impl Default for PingMonitorApp {
             target: "8.8.8.8".to_string(),
             is_monitoring: false,
             ping_results: VecDeque::new(),
-            circles: [CircleColor::Gray; 12],
-            circle_timestamps: [None; 12],
+            circles: [CircleColor::Gray; NUM_CIRCLES],
+            circle_timestamps: [None; NUM_CIRCLES],
             last_ping_second: None,
             ping_statistics: PingStatistics::default(),
             ping_receiver: None,
             ping_sender: None,
             pending_pings: HashMap::new(),
-            dns_cache: HashMap::new(),
+            dns_cache: DnsCache::new(),
             green_threshold: 100,
             yellow_threshold: 200,
             last_response_time: None,
@@ -152,52 +66,23 @@ impl Default for PingMonitorApp {
 
 impl PingMonitorApp {
     pub fn new() -> Self {
-        let config = Self::load_config();
+        let config = AppConfig::load();
         Self {
             target: config.target,
             is_monitoring: false,
             ping_results: VecDeque::new(),
-            circles: [CircleColor::Gray; 12],
-            circle_timestamps: [None; 12],
+            circles: [CircleColor::Gray; NUM_CIRCLES],
+            circle_timestamps: [None; NUM_CIRCLES],
             last_ping_second: None,
             ping_statistics: PingStatistics::default(),
             ping_receiver: None,
             ping_sender: None,
             pending_pings: HashMap::new(),
-            dns_cache: HashMap::new(),
+            dns_cache: DnsCache::new(),
             green_threshold: config.green_threshold,
             yellow_threshold: config.yellow_threshold,
             last_response_time: None,
         }
-    }
-
-    fn get_config_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let config_dir = dirs::config_dir()
-            .ok_or("Could not find config directory")?
-            .join("PingMonitor");
-        
-        fs::create_dir_all(&config_dir)?;
-        Ok(config_dir.join("config.json"))
-    }
-
-    fn load_config() -> AppConfig {
-        match Self::get_config_path() {
-            Ok(path) => {
-                if path.exists() {
-                    match fs::read_to_string(&path) {
-                        Ok(content) => {
-                            match serde_json::from_str::<AppConfig>(&content) {
-                                Ok(config) => return config,
-                                Err(e) => eprintln!("Failed to parse config: {e}"),
-                            }
-                        }
-                        Err(e) => eprintln!("Failed to read config file: {e}"),
-                    }
-                }
-            }
-            Err(e) => eprintln!("Failed to get config path: {e}"),
-        }
-        AppConfig::default()
     }
 
     fn save_config(&self) {
@@ -207,178 +92,26 @@ impl PingMonitorApp {
             yellow_threshold: self.yellow_threshold,
         };
 
-        match Self::get_config_path() {
-            Ok(path) => {
-                match serde_json::to_string_pretty(&config) {
-                    Ok(content) => {
-                        if let Err(e) = fs::write(&path, content) {
-                            eprintln!("Failed to save config: {e}");
-                        }
-                    }
-                    Err(e) => eprintln!("Failed to serialize config: {e}"),
-                }
-            }
-            Err(e) => eprintln!("Failed to get config path: {e}"),
+        if let Err(e) = config.save() {
+            eprintln!("Failed to save config: {e}");
         }
     }
-
-
-    fn resolve_and_ping_async(&mut self, target: String, _circle_index: usize, sender: mpsc::Sender<PingResult>) {
-        let timestamp = SystemTime::now();
-        
-        thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let result = rt.block_on(async {
-                // Parse target as IP address or resolve hostname
-                let target_ip: IpAddr = match target.parse() {
-                    Ok(ip) => ip,
-                    Err(_) => {
-                        // Try to resolve hostname
-                        match tokio::net::lookup_host(&format!("{target}:80")).await {
-                            Ok(mut addrs) => {
-                                if let Some(addr) = addrs.next() {
-                                    addr.ip()
-                                } else {
-                                    return PingResult {
-                                        timestamp,
-                                        response_time: None,
-                                        success: false,
-                                        resolved_ip: None,
-                                    };
-                                }
-                            }
-                            Err(_) => return PingResult {
-                                timestamp,
-                                response_time: None,
-                                success: false,
-                                resolved_ip: None,
-                            },
-                        }
-                    }
-                };
-
-                let config = Config::default();
-                let client = Client::new(&config);
-                
-                match client {
-                    Ok(client) => {
-                        let mut pinger = client.pinger(target_ip, PingIdentifier(1)).await;
-                        pinger.timeout(Duration::from_secs(5));
-                        
-                        match pinger.ping(PingSequence(1), &[]).await {
-                            Ok((IcmpPacket::V4(_packet), duration)) => {
-                                PingResult {
-                                    timestamp,
-                                    response_time: Some(duration.as_secs_f64() * 1000.0),
-                                    success: true,
-                                    resolved_ip: Some((target.clone(), target_ip)),
-                                }
-                            }
-                            Ok((IcmpPacket::V6(_packet), duration)) => {
-                                PingResult {
-                                    timestamp,
-                                    response_time: Some(duration.as_secs_f64() * 1000.0),
-                                    success: true,
-                                    resolved_ip: Some((target.clone(), target_ip)),
-                                }
-                            }
-                            Err(_) => PingResult {
-                                timestamp,
-                                response_time: None,
-                                success: false,
-                                resolved_ip: None,
-                            },
-                        }
-                    }
-                    Err(_) => PingResult {
-                        timestamp,
-                        response_time: None,
-                        success: false,
-                        resolved_ip: None,
-                    },
-                }
-            });
-            
-            let _ = sender.send(result);
-        });
-    }
-
-    fn start_async_ping_with_ip(&self, target_ip: IpAddr, _circle_index: usize, sender: mpsc::Sender<PingResult>) {
-        let timestamp = SystemTime::now();
-        
-        thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
-            let result = rt.block_on(async {
-
-                let config = Config::default();
-                let client = Client::new(&config);
-                
-                match client {
-                    Ok(client) => {
-                        let mut pinger = client.pinger(target_ip, PingIdentifier(1)).await;
-                        pinger.timeout(Duration::from_secs(5));
-                        
-                        match pinger.ping(PingSequence(1), &[]).await {
-                            Ok((IcmpPacket::V4(_packet), duration)) => {
-                                PingResult {
-                                    timestamp,
-                                    response_time: Some(duration.as_secs_f64() * 1000.0),
-                                    success: true,
-                                    resolved_ip: None, // This function uses pre-resolved IP
-                                }
-                            }
-                            Ok((IcmpPacket::V6(_packet), duration)) => {
-                                PingResult {
-                                    timestamp,
-                                    response_time: Some(duration.as_secs_f64() * 1000.0),
-                                    success: true,
-                                    resolved_ip: None, // This function uses pre-resolved IP
-                                }
-                            }
-                            Err(_) => PingResult {
-                                timestamp,
-                                response_time: None,
-                                success: false,
-                                resolved_ip: None,
-                            },
-                        }
-                    }
-                    Err(_) => PingResult {
-                        timestamp,
-                        response_time: None,
-                        success: false,
-                        resolved_ip: None,
-                    },
-                }
-            });
-            
-            let _ = sender.send(result);
-        });
-    }
-
 
     fn get_circle_color(&self, ping_result: &PingResult) -> CircleColor {
         if !ping_result.success {
             return CircleColor::Red;
         }
         
-        match ping_result.response_time {
-            Some(time) => {
-                if time < self.green_threshold as f64 {
-                    CircleColor::Green
-                } else if time < self.yellow_threshold as f64 {
-                    CircleColor::Yellow
-                } else {
-                    CircleColor::Orange
-                }
-            }
-            None => CircleColor::Red,
-        }
+        CircleColor::from_ping_response(
+            ping_result.response_time,
+            self.green_threshold,
+            self.yellow_threshold
+        )
     }
 
     fn update_statistics(&mut self) {
         let now = SystemTime::now();
-        let cutoff_time = now - Duration::from_secs(60);
+        let cutoff_time = now - Duration::from_secs(STATISTICS_WINDOW_SECS);
         
         // Filter ping results to only include those from the last 60 seconds
         let recent_results: Vec<&PingResult> = self.ping_results
@@ -419,26 +152,16 @@ impl PingMonitorApp {
         
         let painter = ui.painter();
         
-        fn place_in_circle(center: Pos2, radius: f32, angle: f32) -> Pos2 {
-            Pos2::new(
-                center.x + radius * angle.cos(),
-                center.y + radius * angle.sin(),
-            )
-        }
+        self.draw_circles(center, radius, circle_radius, painter, ui);
+        self.draw_second_hand(center, radius, painter);
+    }
 
-        for i in 0..12 {
+    fn draw_circles(&self, center: Pos2, radius: f32, circle_radius: f32, painter: &egui::Painter, ui: &egui::Ui) {
+        for i in 0..NUM_CIRCLES {
             let angle = (i as f32 * 30.0 - 90.0) * std::f32::consts::PI / 180.0;
-            let pos = place_in_circle(center, radius, angle);
-            let color = if let Some(timestamp) = self.circle_timestamps[i] {
-                if let Ok(elapsed) = SystemTime::now().duration_since(timestamp) {
-                    let elapsed_seconds = elapsed.as_secs_f64();
-                    self.circles[i].to_color32_with_age(elapsed_seconds)
-                } else {
-                    self.circles[i].to_color32()
-                }
-            } else {
-                self.circles[i].to_color32()
-            };
+            let pos = Self::place_in_circle(center, radius, angle);
+            
+            let color = self.get_circle_color_with_age(i);
             painter.circle_filled(pos, circle_radius, color);
             
             let stroke_color = if self.pending_pings.contains_key(&i) {
@@ -448,13 +171,28 @@ impl PingMonitorApp {
             };
             painter.circle_stroke(pos, circle_radius, Stroke::new(2.0, stroke_color));
             
-            let text = format!("{}", i * 5);
-            let text_pos = place_in_circle(center, radius - 25.0, angle);
-            let font_size = 12.0;
-            let font = egui::FontId::monospace(font_size);
-            painter.text(text_pos, egui::Align2::CENTER_CENTER, text, font, ui.visuals().text_color());
+            self.draw_circle_label(center, radius, angle, i, painter, ui);
         }
-        
+    }
+
+    fn get_circle_color_with_age(&self, circle_index: usize) -> Color32 {
+        if let Some(timestamp) = self.circle_timestamps[circle_index] {
+            if let Ok(elapsed) = SystemTime::now().duration_since(timestamp) {
+                let elapsed_seconds = elapsed.as_secs_f64();
+                return self.circles[circle_index].to_color32_with_age(elapsed_seconds);
+            }
+        }
+        self.circles[circle_index].to_color32()
+    }
+
+    fn draw_circle_label(&self, center: Pos2, radius: f32, angle: f32, index: usize, painter: &egui::Painter, ui: &egui::Ui) {
+        let text = format!("{}", index * PING_INTERVAL_SECS as usize);
+        let text_pos = Self::place_in_circle(center, radius - 25.0, angle);
+        let font = egui::FontId::monospace(12.0);
+        painter.text(text_pos, egui::Align2::CENTER_CENTER, text, font, ui.visuals().text_color());
+    }
+
+    fn draw_second_hand(&self, center: Pos2, radius: f32, painter: &egui::Painter) {
         let now = SystemTime::now();
         let duration = now.duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0));
         let total_ms = duration.as_millis() % 60000;
@@ -468,6 +206,13 @@ impl PingMonitorApp {
         painter.line_segment([center, hand_end], Stroke::new(3.0, Color32::RED));
         painter.circle_filled(center, 4.0, Color32::RED);
     }
+
+    fn place_in_circle(center: Pos2, radius: f32, angle: f32) -> Pos2 {
+        Pos2::new(
+            center.x + radius * angle.cos(),
+            center.y + radius * angle.sin(),
+        )
+    }
 }
 
 impl eframe::App for PingMonitorApp {
@@ -476,7 +221,31 @@ impl eframe::App for PingMonitorApp {
         let previous_green = self.green_threshold;
         let previous_yellow = self.yellow_threshold;
         
-        // Handle incoming ping results
+        // Process incoming ping results
+        self.process_ping_results();
+        
+        // Clean up old pending pings
+        self.cleanup_pending_pings();
+        
+        // Handle periodic pinging
+        if self.is_monitoring {
+            self.handle_periodic_ping();
+        }
+
+        // Render UI
+        self.render_ui(ctx);
+        
+        // Save config if changed
+        if previous_target != self.target || previous_green != self.green_threshold || previous_yellow != self.yellow_threshold {
+            self.save_config();
+        }
+        
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
+}
+
+impl PingMonitorApp {
+    fn process_ping_results(&mut self) {
         let mut ping_results_to_process = Vec::new();
         if let Some(receiver) = &self.ping_receiver {
             while let Ok(ping_result) = receiver.try_recv() {
@@ -489,144 +258,144 @@ impl eframe::App for PingMonitorApp {
             self.circles[circle_index] = self.get_circle_color(&ping_result);
             self.circle_timestamps[circle_index] = Some(ping_result.timestamp);
             
-            // Update last response time
             self.last_response_time = ping_result.response_time;
             
             // Update DNS cache if we have resolution info
             if let Some((hostname, ip)) = &ping_result.resolved_ip {
-                if hostname != &ip.to_string() { // Only cache actual hostnames, not IP addresses
-                    self.dns_cache.insert(hostname.clone(), DnsCacheEntry::new(*ip, 300)); // 5-minute TTL
+                if hostname != &ip.to_string() {
+                    self.dns_cache.insert(hostname.clone(), DnsCacheEntry::new(*ip, DNS_CACHE_TTL_SECS));
                 }
             }
             
             self.ping_results.push_back(ping_result);
             
-            if self.ping_results.len() > 60 {
+            if self.ping_results.len() > MAX_PING_RESULTS {
                 self.ping_results.pop_front();
             }
             
             self.update_statistics();
-            
-            // Remove from pending pings
             self.pending_pings.remove(&circle_index);
         }
-        
-        // Clean up old pending pings (timeout after 10 seconds)
+    }
+
+    fn cleanup_pending_pings(&mut self) {
         let now = SystemTime::now();
-        let timeout_duration = Duration::from_secs(10);
+        let timeout_duration = Duration::from_secs(PENDING_PING_TIMEOUT_SECS);
         self.pending_pings.retain(|_, &mut timestamp| {
             now.duration_since(timestamp).unwrap_or(Duration::from_secs(0)) < timeout_duration
         });
-        
-        if self.is_monitoring {
-            let duration = now.duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0));
-            let current_second = duration.as_secs();
-            let current_5sec_boundary = (current_second / 5) * 5;
-            
-            let should_ping = match self.last_ping_second {
-                Some(last) => current_5sec_boundary > last,
-                None => current_second % 5 == 0,
-            };
+    }
 
-            if should_ping {
-                let circle_index = Self::get_circle_index_for_time(now);
-                
-                // Only start a new ping if we're not already pinging this circle
-                if !self.pending_pings.contains_key(&circle_index) {
-                    // Initialize channel if needed
-                    if self.ping_receiver.is_none() {
-                        let (sender, receiver) = mpsc::channel();
-                        self.ping_receiver = Some(receiver);
-                        self.ping_sender = Some(sender);
-                    }
-                    
-                    // Start the ping using the existing sender
-                    if let Some(sender) = &self.ping_sender {
-                        // Resolve target with DNS caching
-                        let target = self.target.clone();
-                        let sender_clone = sender.clone();
-                        let cache_entry = self.dns_cache.get(&target);
-                        
-                        // Check if we have a valid cached IP
-                        if let Some(entry) = cache_entry {
-                            if !entry.is_expired() {
-                                // Use cached IP
-                                self.start_async_ping_with_ip(entry.ip_address, circle_index, sender_clone);
-                                self.pending_pings.insert(circle_index, now);
-                                self.last_ping_second = Some(current_5sec_boundary);
-                            } else {
-                                // Cache expired, remove it and resolve again
-                                self.dns_cache.remove(&target);
-                                self.resolve_and_ping_async(target, circle_index, sender_clone);
-                                self.pending_pings.insert(circle_index, now);
-                                self.last_ping_second = Some(current_5sec_boundary);
-                            }
-                        } else {
-                            // No cache entry, need to resolve
-                            self.resolve_and_ping_async(target, circle_index, sender_clone);
-                            self.pending_pings.insert(circle_index, now);
-                            self.last_ping_second = Some(current_5sec_boundary);
-                        }
-                    }
-                }
-            }
+    fn handle_periodic_ping(&mut self) {
+        let now = SystemTime::now();
+        let duration = now.duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0));
+        let current_second = duration.as_secs();
+        let current_5sec_boundary = (current_second / PING_INTERVAL_SECS) * PING_INTERVAL_SECS;
+        
+        let should_ping = match self.last_ping_second {
+            Some(last) => current_5sec_boundary > last,
+            None => current_second % PING_INTERVAL_SECS == 0,
+        };
+
+        if should_ping {
+            self.initiate_ping(now, current_5sec_boundary);
+        }
+    }
+
+    fn initiate_ping(&mut self, now: SystemTime, current_5sec_boundary: u64) {
+        let circle_index = Self::get_circle_index_for_time(now);
+        
+        // Only start a new ping if we're not already pinging this circle
+        if self.pending_pings.contains_key(&circle_index) {
+            return;
         }
 
+        // Initialize channel if needed
+        if self.ping_receiver.is_none() {
+            let (sender, receiver) = mpsc::channel();
+            self.ping_receiver = Some(receiver);
+            self.ping_sender = Some(sender);
+        }
+        
+        if let Some(sender) = &self.ping_sender {
+            let target = self.target.clone();
+            let sender_clone = sender.clone();
+            
+            // Check for valid cached IP
+            if let Some(cached_ip) = self.dns_cache.get_valid_ip(&target) {
+                PingExecutor::ping_with_ip(cached_ip, sender_clone);
+            } else {
+                // Clean expired cache and resolve
+                self.dns_cache.clean_expired(&target);
+                PingExecutor::resolve_and_ping(target, sender_clone);
+            }
+            
+            self.pending_pings.insert(circle_index, now);
+            self.last_ping_second = Some(current_5sec_boundary);
+        }
+    }
+
+    fn render_ui(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Ping Monitor");
             
-            ui.horizontal(|ui| {
-                ui.label("Target (IP or hostname):");
-                ui.add_enabled(!self.is_monitoring, egui::TextEdit::singleline(&mut self.target));
-            });
-            
-            ui.label("Time Thresholds:");
-            ui.horizontal(|ui| {
-                ui.label("Green < ");
-                ui.add(egui::DragValue::new(&mut self.green_threshold).range(1..=1000));
-                ui.label("[ms]");
-                ui.label("≤ Yellow <");
-                ui.add(egui::DragValue::new(&mut self.yellow_threshold).range(1..=2000));
-                ui.label("[ms]");
-                ui.label("≤ Orange");
-            });
-            
-            ui.horizontal(|ui| {
-                if ui.button(if self.is_monitoring { "Stop" } else { "Start" }).clicked() {
-                    self.is_monitoring = !self.is_monitoring;
-                    if self.is_monitoring {
-                        self.last_ping_second = None;
-                    }
-                }
-            });
+            self.render_target_input(ui);
+            self.render_threshold_controls(ui);
+            self.render_control_buttons(ui);
             
             ui.separator();
             
-            ui.label(format!("Success Rate: {:.1}%", 100.0 - self.ping_statistics.loss_rate));
-            ui.label(format!("Loss Rate: {:.1}%", self.ping_statistics.loss_rate));
-            ui.label(format!("Mean Response Time: {:.1}ms", self.ping_statistics.mean_response_time));
-            ui.label(format!("Last Response Time: {}", 
-                match self.last_response_time {
-                    Some(time) => format!("{time:.1}ms"),
-                    None => "N/A".to_string(),
-                }
-            ));
-
+            self.render_statistics(ui);
+            
             ui.separator();
             
             let clock_height = 240.0;
-            
             ui.allocate_ui(Vec2::new(ui.available_width(), clock_height), |ui| {
                 self.draw_clock_face(ui);
             });
-
-            
         });
-        
-        if previous_target != self.target || previous_green != self.green_threshold || previous_yellow != self.yellow_threshold {
-            self.save_config();
-        }
-        
-        ctx.request_repaint_after(Duration::from_millis(100));
+    }
+
+    fn render_target_input(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Target (IP or hostname):");
+            ui.add_enabled(!self.is_monitoring, egui::TextEdit::singleline(&mut self.target));
+        });
+    }
+
+    fn render_threshold_controls(&mut self, ui: &mut egui::Ui) {
+        ui.label("Time Thresholds:");
+        ui.horizontal(|ui| {
+            ui.label("Green < ");
+            ui.add(egui::DragValue::new(&mut self.green_threshold).range(1..=1000));
+            ui.label("[ms]");
+            ui.label("≤ Yellow <");
+            ui.add(egui::DragValue::new(&mut self.yellow_threshold).range(1..=2000));
+            ui.label("[ms]");
+            ui.label("≤ Orange");
+        });
+    }
+
+    fn render_control_buttons(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.button(if self.is_monitoring { "Stop" } else { "Start" }).clicked() {
+                self.is_monitoring = !self.is_monitoring;
+                if self.is_monitoring {
+                    self.last_ping_second = None;
+                }
+            }
+        });
+    }
+
+    fn render_statistics(&self, ui: &mut egui::Ui) {
+        ui.label(format!("Success Rate: {:.1}%", 100.0 - self.ping_statistics.loss_rate));
+        ui.label(format!("Loss Rate: {:.1}%", self.ping_statistics.loss_rate));
+        ui.label(format!("Mean Response Time: {:.1}ms", self.ping_statistics.mean_response_time));
+        ui.label(format!("Last Response Time: {}", 
+            match self.last_response_time {
+                Some(time) => format!("{time:.1}ms"),
+                None => "N/A".to_string(),
+            }
+        ));
     }
 }
