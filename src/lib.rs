@@ -186,7 +186,7 @@ impl PingMonitorApp {
     }
 
     fn draw_circle_label(&self, center: Pos2, radius: f32, angle: f32, index: usize, painter: &egui::Painter, ui: &egui::Ui) {
-        let text = format!("{}", index * PING_INTERVAL_SECS as usize);
+        let text = format!("{}", index * 5);
         let text_pos = Self::place_in_circle(center, radius - 25.0, angle);
         let font = egui::FontId::monospace(12.0);
         painter.text(text_pos, egui::Align2::CENTER_CENTER, text, font, ui.visuals().text_color());

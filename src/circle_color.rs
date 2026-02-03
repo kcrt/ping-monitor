@@ -34,7 +34,7 @@ impl CircleColor {
             return base_color;
         }
         
-        // Fade from full color to gray between 35-55 seconds
+        // Fade from full color to gray over the age threshold range
         let fade_range = AGE_THRESHOLD_GRAY - AGE_THRESHOLD_FULL_COLOR;
         let fade_factor = 1.0 - (elapsed_seconds - AGE_THRESHOLD_FULL_COLOR) / fade_range;
         let fade_factor = fade_factor.clamp(0.0, 1.0) as f32;
