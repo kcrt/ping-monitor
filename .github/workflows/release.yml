@@ -168,11 +168,33 @@ jobs:
               if [ -f "$EXECUTABLE" ]; then
                 echo "Setting executable permissions on $EXECUTABLE"
                 chmod +x "$EXECUTABLE"
+                
+                # Verify the executable has correct permissions
+                if [ -x "$EXECUTABLE" ]; then
+                  echo "✓ Executable permissions verified: $EXECUTABLE"
+                  ls -l "$EXECUTABLE"
+                  
+                  # Test that the executable can be invoked (will show help/version)
+                  echo "Testing executable (should fail gracefully without network)..."
+                  "$EXECUTABLE" --help 2>&1 || echo "Executable runs (exit code: $?)"
+                else
+                  echo "✗ ERROR: Executable is not executable after chmod!"
+                  ls -l "$EXECUTABLE"
+                  exit 1
+                fi
+              else
+                echo "✗ ERROR: Executable not found at $EXECUTABLE"
+                exit 1
               fi
               
               # Create a zip of the .app bundle preserving permissions
               WORKSPACE_DIR="$(pwd)"
               (cd "$WORKSPACE_DIR/target/release/bundle/osx" && zip -ry "$WORKSPACE_DIR/${ARTIFACT_NAME}.zip" PingMonitor.app)
+              
+              # Verify permissions are preserved in the zip
+              echo "Verifying permissions in zip archive..."
+              unzip -l "${ARTIFACT_NAME}.zip" | grep "ping-monitor$" || echo "Checking zip contents..."
+              
               echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
               exit 0
             else
