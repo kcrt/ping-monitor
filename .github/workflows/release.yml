@@ -135,8 +135,9 @@ jobs:
           New-Item -ItemType Directory -Force -Path "artifacts"
           
           # Check if MSI bundle was created
-          $MSI_PATH = "target\release\bundle\msi\PingMonitor_${VERSION}_x64_en-US.msi"
-          if (Test-Path $MSI_PATH) {
+          $MSI_FILES = Get-ChildItem -Path "target\release\bundle\msi\*.msi" -ErrorAction SilentlyContinue
+          if ($MSI_FILES) {
+            $MSI_PATH = $MSI_FILES[0].FullName
             Write-Host "Found MSI bundle at $MSI_PATH"
             Copy-Item $MSI_PATH "artifacts\PingMonitor.msi"
             Compress-Archive -Path "artifacts\PingMonitor.msi" -DestinationPath "$ARTIFACT_NAME.zip"
@@ -164,8 +165,9 @@ jobs:
             APP_BUNDLE="target/release/bundle/osx/PingMonitor.app"
             if [ -d "$APP_BUNDLE" ]; then
               echo "Found macOS app bundle at $APP_BUNDLE"
-              # Create a zip of the .app bundle
-              (cd target/release/bundle/osx && zip -r "../../../../${ARTIFACT_NAME}.zip" PingMonitor.app)
+              # Create a zip of the .app bundle using absolute paths
+              WORKSPACE_DIR="$(pwd)"
+              (cd "$WORKSPACE_DIR/target/release/bundle/osx" && zip -r "$WORKSPACE_DIR/${ARTIFACT_NAME}.zip" PingMonitor.app)
               echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
               exit 0
             else
