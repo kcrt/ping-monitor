@@ -87,17 +87,17 @@ jobs:
       
       - name: Cache cross installation
         if: matrix.use_cross
+        id: cache-cross
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/cross
-          key: ${{ runner.os }}-cross
+          key: ${{ runner.os }}-cross-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cross-
       
       - name: Install cross (if needed)
-        if: matrix.use_cross
-        run: |
-          if ! command -v cross > /dev/null 2>&1; then
-            cargo install cross --git https://github.com/cross-rs/cross
-          fi
+        if: matrix.use_cross && steps.cache-cross.outputs.cache-hit != 'true'
+        run: cargo install cross --git https://github.com/cross-rs/cross
       
       - name: Build (native)
         if: ${{ !matrix.use_cross }}
