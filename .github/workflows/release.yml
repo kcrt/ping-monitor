@@ -92,7 +92,7 @@ jobs:
           targets: ${{ matrix.target }}
       
       - name: Install cargo-bundle
-        if: ${{ !matrix.use_cross && (runner.os == 'Windows' || runner.os == 'macOS') }}
+        if: ${{ !matrix.use_cross && runner.os == 'macOS' }}
         run: cargo install cargo-bundle
       
       - name: Cache cross installation
@@ -113,7 +113,7 @@ jobs:
         if: ${{ !matrix.use_cross }}
         run: |
           if [ "$RUNNER_OS" == "Windows" ]; then
-            ./build.bat
+            cargo build --release --target ${{ matrix.target }}
           elif [ "$RUNNER_OS" == "macOS" ]; then
             ./build.sh
           else
@@ -134,18 +134,15 @@ jobs:
           
           New-Item -ItemType Directory -Force -Path "artifacts"
           
-          # Check if MSI bundle was created
-          $MSI_FILES = Get-ChildItem -Path "target\release\bundle\msi\*.msi" -ErrorAction SilentlyContinue
-          if ($MSI_FILES) {
-            $MSI_PATH = $MSI_FILES[0].FullName
-            Write-Host "Found MSI bundle at $MSI_PATH"
-            Copy-Item $MSI_PATH "artifacts\PingMonitor.msi"
-            Compress-Archive -Path "artifacts\PingMonitor.msi" -DestinationPath "$ARTIFACT_NAME.zip"
-          } else {
-            Write-Host "MSI not found, using plain executable"
-            $BINARY_PATH = "target\$TARGET\release\ping-monitor.exe"
+          # Use plain executable instead of MSI installer
+          $BINARY_PATH = "target\$TARGET\release\ping-monitor.exe"
+          if (Test-Path $BINARY_PATH) {
+            Write-Host "Using plain executable at $BINARY_PATH"
             Copy-Item $BINARY_PATH "artifacts\ping-monitor.exe"
             Compress-Archive -Path "artifacts\ping-monitor.exe" -DestinationPath "$ARTIFACT_NAME.zip"
+          } else {
+            Write-Host "Error: Binary not found at $BINARY_PATH"
+            exit 1
           }
           
           Add-Content -Path $env:GITHUB_ENV -Value "ARTIFACT_NAME=$ARTIFACT_NAME"
@@ -165,9 +162,51 @@ jobs:
             APP_BUNDLE="target/release/bundle/osx/PingMonitor.app"
             if [ -d "$APP_BUNDLE" ]; then
               echo "Found macOS app bundle at $APP_BUNDLE"
-              # Create a zip of the .app bundle using absolute paths
+              
+              # Ensure the executable has proper permissions
+              EXECUTABLE="$APP_BUNDLE/Contents/MacOS/ping-monitor"
+              if [ -f "$EXECUTABLE" ]; then
+                echo "Setting executable permissions on $EXECUTABLE"
+                chmod +x "$EXECUTABLE"
+                
+                # Verify the executable has correct permissions
+                if [ -x "$EXECUTABLE" ]; then
+                  echo "✓ Executable permissions verified: $EXECUTABLE"
+                  ls -l "$EXECUTABLE"
+                  
+                  # Verify it's a valid Mach-O executable
+                  echo "Verifying binary format..."
+                  file "$EXECUTABLE"
+                  if file "$EXECUTABLE" | grep -q "Mach-O"; then
+                    echo "✓ Valid Mach-O executable confirmed"
+                  else
+                    echo "✗ ERROR: Not a valid Mach-O executable!"
+                    exit 1
+                  fi
+                else
+                  echo "✗ ERROR: Executable is not executable after chmod!"
+                  ls -l "$EXECUTABLE"
+                  exit 1
+                fi
+              else
+                echo "✗ ERROR: Executable not found at $EXECUTABLE"
+                exit 1
+              fi
+              
+              # Create a zip of the .app bundle preserving permissions
               WORKSPACE_DIR="$(pwd)"
-              (cd "$WORKSPACE_DIR/target/release/bundle/osx" && zip -r "$WORKSPACE_DIR/${ARTIFACT_NAME}.zip" PingMonitor.app)
+              (cd "$WORKSPACE_DIR/target/release/bundle/osx" && zip -ry "$WORKSPACE_DIR/${ARTIFACT_NAME}.zip" PingMonitor.app)
+              
+              # Verify permissions are preserved in the zip
+              echo "Verifying executable in zip archive..."
+              if unzip -l "${ARTIFACT_NAME}.zip" | grep -q "PingMonitor.app/Contents/MacOS/ping-monitor"; then
+                echo "✓ Executable found in zip archive"
+              else
+                echo "✗ ERROR: Executable not found in zip archive!"
+                unzip -l "${ARTIFACT_NAME}.zip" | head -20
+                exit 1
+              fi
+              
               echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
               exit 0
             else
@@ -178,10 +217,11 @@ jobs:
           # Fallback to plain binary
           BINARY_PATH="target/${TARGET}/release/ping-monitor"
           cp "$BINARY_PATH" "artifacts/ping-monitor"
+          chmod +x "artifacts/ping-monitor"
           
-          # Create ZIP archive
+          # Create ZIP archive preserving permissions
           cd artifacts
-          zip "../${ARTIFACT_NAME}.zip" ping-monitor
+          zip -ry "../${ARTIFACT_NAME}.zip" ping-monitor
           cd ..
           
           echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
