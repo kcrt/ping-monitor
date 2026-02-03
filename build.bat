@@ -10,9 +10,9 @@ if %ERRORLEVEL% NEQ 0 (
     cargo install cargo-bundle
 )
 
-REM Build the Windows executable bundle
+REM Build the Windows executable bundle with release profile
 echo Building Windows executable bundle...
-cargo bundle --format msi
+cargo bundle --release --format msi
 
 echo Build process completed!
 echo Check the 'target\release\bundle\msi\' directory for the installer.
