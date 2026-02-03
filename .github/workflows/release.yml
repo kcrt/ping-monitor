@@ -115,7 +115,7 @@ jobs:
           if [ "$RUNNER_OS" == "Windows" ]; then
             ./build.bat
           elif [ "$RUNNER_OS" == "macOS" ]; then
-            ./build.sh --macos
+            ./build.sh
           else
             cargo build --release --target ${{ matrix.target }}
           fi
@@ -164,10 +164,8 @@ jobs:
             APP_BUNDLE="target/release/bundle/osx/PingMonitor.app"
             if [ -d "$APP_BUNDLE" ]; then
               echo "Found macOS app bundle at $APP_BUNDLE"
-              # Create a DMG or zip of the .app bundle
-              cd target/release/bundle/osx
-              zip -r "../../../../${ARTIFACT_NAME}.zip" PingMonitor.app
-              cd ../../../../
+              # Create a zip of the .app bundle
+              (cd target/release/bundle/osx && zip -r "../../../../${ARTIFACT_NAME}.zip" PingMonitor.app)
               echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
               exit 0
             else
