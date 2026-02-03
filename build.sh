@@ -8,6 +8,7 @@ usage() {
     echo "  --macos      Build macOS application bundle (.app)"
     echo "  --install    Build and install macOS app to /Applications (macOS only)"
     echo "  --all        Build for all platforms"
+    echo "  --auto       Auto-detect platform and build (default for CI/CD)"
     echo "  --help       Display this help message"
     exit 1
 }
@@ -17,8 +18,22 @@ if ! command -v cargo-bundle &> /dev/null; then
     cargo install cargo-bundle
 fi
 
+# Auto-detect platform if no arguments provided
 if [ $# -eq 0 ]; then
-    usage
+    echo "No arguments provided. Auto-detecting platform..."
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        set -- --macos
+    elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
+        set -- --windows
+    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        # Linux doesn't use cargo-bundle for releases, just regular build
+        echo "Linux detected. Building with cargo build --release..."
+        cargo build --release
+        echo "Build completed. Binary available at target/release/ping-monitor"
+        exit 0
+    else
+        usage
+    fi
 fi
 
 BUILD_WINDOWS=false
@@ -44,6 +59,9 @@ while [ $# -gt 0 ]; do
         --all)
             BUILD_WINDOWS=true
             BUILD_MACOS=true
+            ;;
+        --auto)
+            # Auto mode already handled above
             ;;
         --help)
             usage
