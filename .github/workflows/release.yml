@@ -177,13 +177,6 @@ jobs:
             # Verify the signature
             codesign --verify --verbose=2 "$APP_BUNDLE"
             
-            # Try spctl assessment (may fail if not notarized yet)
-            if spctl --assess --verbose=2 --type execute "$APP_BUNDLE" 2>&1; then
-              echo "✓ App bundle passed Gatekeeper assessment"
-            else
-              echo "⚠ Warning: spctl assessment failed - app may need notarization for Gatekeeper approval"
-            fi
-            
             echo "✓ App bundle signed successfully"
           else
             echo "Warning: App bundle not found at $APP_BUNDLE"
