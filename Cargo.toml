@@ -1,6 +1,6 @@
 [package]
 name = "ping-monitor"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "A network connection monitoring application using ping"
 authors = ["kcrt <kcrt@kcrt.net>"]
@@ -8,8 +8,8 @@ authors = ["kcrt <kcrt@kcrt.net>"]
 [package.metadata.bundle]
 name = "PingMonitor"
 identifier = "net.kcrt.ping-monitor"
-version = "0.1.1"
-copyright = "Copyright (c) kcrt 2025. All rights reserved."
+version = "0.1.2"
+copyright = "Copyright (c) kcrt 2026. All rights reserved."
 category = "Utility"
 short_description = "Network connectivity monitoring with visual ping status"
 long_description = """
