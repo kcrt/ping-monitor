@@ -159,28 +159,30 @@ jobs:
           if [ -d "$APP_BUNDLE" ]; then
             echo "Signing $APP_BUNDLE..."
             
-            # Find the certificate identity
-            IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | grep -o '"[^"]*"' | tr -d '"')
+            # Find the certificate identity - prefer Developer ID Application
+            IDENTITY=$(security find-identity -v -p codesigning | awk '/Developer ID Application/ {match($0, /"[^"]*"/); print substr($0, RSTART+1, RLENGTH-2); exit}')
             
             if [ -z "$IDENTITY" ]; then
-              echo "Warning: No Developer ID Application certificate found. Trying alternative approach..."
-              IDENTITY=$(security find-identity -v -p codesigning | head -2 | tail -1 | grep -o '"[^"]*"' | tr -d '"')
-            fi
-            
-            if [ -z "$IDENTITY" ]; then
-              echo "Error: No valid signing identity found"
+              echo "Error: No Developer ID Application certificate found"
+              echo "Available identities:"
               security find-identity -v -p codesigning
               exit 1
             fi
             
             echo "Using identity: $IDENTITY"
             
-            # Sign the app bundle with hardened runtime
-            codesign --force --deep --sign "$IDENTITY" --options runtime --timestamp "$APP_BUNDLE"
+            # Sign the app bundle with hardened runtime (without --deep flag)
+            codesign --force --sign "$IDENTITY" --options runtime --timestamp "$APP_BUNDLE"
             
             # Verify the signature
             codesign --verify --verbose=2 "$APP_BUNDLE"
-            spctl --assess --verbose=2 --type execute "$APP_BUNDLE"
+            
+            # Try spctl assessment (may fail if not notarized yet)
+            if spctl --assess --verbose=2 --type execute "$APP_BUNDLE" 2>&1; then
+              echo "✓ App bundle passed Gatekeeper assessment"
+            else
+              echo "⚠ Warning: spctl assessment failed - app may need notarization for Gatekeeper approval"
+            fi
             
             echo "✓ App bundle signed successfully"
           else
