@@ -93,7 +93,7 @@ jobs:
           targets: ${{ matrix.target }}
       
       - name: Install cargo-bundle
-        if: ${{ !matrix.use_cross && (runner.os == 'macOS' || runner.os == 'Windows') }}
+        if: ${{ !matrix.use_cross && runner.os == 'macOS' }}
         run: cargo install cargo-bundle
       
       - name: Cache cross installation
@@ -108,13 +108,13 @@ jobs:
       
       - name: Install cross (if needed)
         if: matrix.use_cross && steps.cache-cross.outputs.cache-hit != 'true'
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        run: cargo install cross --git https://github.com/cross-rs/cross --force
       
       - name: Build (native)
         if: ${{ !matrix.use_cross }}
         run: |
           if [ "$RUNNER_OS" == "Windows" ]; then
-            cargo bundle --release --target ${{ matrix.target }} --format msi
+            cargo build --release --target ${{ matrix.target }}
           elif [ "$RUNNER_OS" == "macOS" ]; then
             ./build.sh
           else
@@ -191,26 +191,15 @@ jobs:
           
           New-Item -ItemType Directory -Force -Path "artifacts"
           
-          # Check for MSI installer from cargo-bundle
-          $MSI_PATH = "target\$TARGET\release\bundle\msi\*.msi"
-          $MSI_FILES = Get-ChildItem $MSI_PATH -ErrorAction SilentlyContinue
-          
-          if ($MSI_FILES) {
-            Write-Host "Using MSI installer from cargo-bundle"
-            $MSI_FILE = $MSI_FILES[0].FullName
-            Copy-Item $MSI_FILE "artifacts\ping-monitor.msi"
-            Compress-Archive -Path "artifacts\ping-monitor.msi" -DestinationPath "$ARTIFACT_NAME.zip"
+          # Package the plain executable
+          $BINARY_PATH = "target\$TARGET\release\ping-monitor.exe"
+          if (Test-Path $BINARY_PATH) {
+            Write-Host "Packaging executable at $BINARY_PATH"
+            Copy-Item $BINARY_PATH "artifacts\ping-monitor.exe"
+            Compress-Archive -Path "artifacts\ping-monitor.exe" -DestinationPath "$ARTIFACT_NAME.zip"
           } else {
-            # Fallback to plain executable if MSI wasn't created
-            $BINARY_PATH = "target\$TARGET\release\ping-monitor.exe"
-            if (Test-Path $BINARY_PATH) {
-              Write-Host "MSI not found, using plain executable at $BINARY_PATH"
-              Copy-Item $BINARY_PATH "artifacts\ping-monitor.exe"
-              Compress-Archive -Path "artifacts\ping-monitor.exe" -DestinationPath "$ARTIFACT_NAME.zip"
-            } else {
-              Write-Host "Error: Neither MSI installer nor binary found"
-              exit 1
-            }
+            Write-Host "Error: Binary not found at $BINARY_PATH"
+            exit 1
           }
           
           Add-Content -Path $env:GITHUB_ENV -Value "ARTIFACT_NAME=$ARTIFACT_NAME"

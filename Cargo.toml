@@ -4,6 +4,7 @@ version = "0.1.2"
 edition = "2024"
 description = "A network connection monitoring application using ping"
 authors = ["kcrt <kcrt@kcrt.net>"]
+build = "build.rs"
 
 [package.metadata.bundle]
 name = "PingMonitor"
@@ -43,3 +44,6 @@ serde_json = "1.0"
 dirs = "5.0"
 surge-ping = "0.8"
 image = "0.24"
+
+[build-dependencies]
+winres = "0.1"
