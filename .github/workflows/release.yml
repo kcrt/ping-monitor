@@ -46,6 +46,7 @@ jobs:
     needs: [extract-version, test]
     permissions:
       contents: read
+    environment: ${{ contains(fromJSON('["x86_64-apple-darwin", "aarch64-apple-darwin"]'), matrix.target) && 'release' || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -124,6 +125,62 @@ jobs:
       - name: Build (cross)
         if: matrix.use_cross
         run: cross build --release --target ${{ matrix.target }}
+      
+      - name: Import code signing certificate (macOS)
+        if: runner.os == 'macOS'
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.P12_PASSWORD }}
+        run: |
+          # Create variables
+          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          
+          # Import certificate from secrets
+          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
+          
+          # Create temporary keychain
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          
+          # Import certificate to keychain
+          security import $CERTIFICATE_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+          
+          # Allow codesign to access the keychain
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+      
+      - name: Sign macOS app bundle
+        if: runner.os == 'macOS'
+        run: |
+          APP_BUNDLE="target/release/bundle/osx/PingMonitor.app"
+          if [ -d "$APP_BUNDLE" ]; then
+            echo "Signing $APP_BUNDLE..."
+            
+            # Find the certificate identity - prefer Developer ID Application
+            IDENTITY=$(security find-identity -v -p codesigning | awk '/Developer ID Application/ {match($0, /"[^"]*"/); print substr($0, RSTART+1, RLENGTH-2); exit}')
+            
+            if [ -z "$IDENTITY" ]; then
+              echo "Error: No Developer ID Application certificate found"
+              echo "Available identities:"
+              security find-identity -v -p codesigning
+              exit 1
+            fi
+            
+            echo "Using identity: $IDENTITY"
+            
+            # Sign the app bundle with hardened runtime (without --deep flag)
+            codesign --force --sign "$IDENTITY" --options runtime --timestamp "$APP_BUNDLE"
+            
+            # Verify the signature
+            codesign --verify --verbose=2 "$APP_BUNDLE"
+            
+            echo "✓ App bundle signed successfully"
+          else
+            echo "Warning: App bundle not found at $APP_BUNDLE"
+          fi
       
       - name: Prepare artifact (Windows)
         if: runner.os == 'Windows'
@@ -226,6 +283,21 @@ jobs:
           
           echo "ARTIFACT_NAME=${ARTIFACT_NAME}" >> $GITHUB_ENV
         shell: bash
+      
+      - name: Cleanup code signing (macOS)
+        if: always() && runner.os == 'macOS'
+        run: |
+          # Clean up the temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          if [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain $KEYCHAIN_PATH || true
+          fi
+          
+          # Clean up the certificate file
+          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+          if [ -f "$CERTIFICATE_PATH" ]; then
+            rm -f $CERTIFICATE_PATH
+          fi
       
       - name: Upload artifact
         uses: actions/upload-artifact@v4
