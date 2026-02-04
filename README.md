@@ -1,5 +1,7 @@
 # PingMonitor
 
+[![Release](https://github.com/kcrt/ping-monitor/actions/workflows/release.yml/badge.svg)](https://github.com/kcrt/ping-monitor/actions/workflows/release.yml)
+
 A cross-platform GUI network monitoring application built with Rust and egui that tracks network connectivity using ping commands. The application visualizes ping results in an intuitive clock-face format with color-coded status indicators.
 
 ![PingMonitor Screenshot](screenshot.png)
