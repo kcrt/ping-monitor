@@ -7,6 +7,24 @@ use crate::ping::PingResult;
 
 const PING_TIMEOUT_SECS: u64 = 5;
 
+/// Sanitize hostname by keeping only valid characters (alphanumeric, dots, hyphens)
+/// Returns None if the result is empty
+fn sanitize_hostname(hostname: &str) -> Option<String> {
+    // Also handle case where user included port like "example.com:8080"
+    let hostname = hostname.split(':').next().unwrap_or(hostname);
+
+    let sanitized: String = hostname
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == '.' || *c == '-')
+        .collect();
+
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized)
+    }
+}
+
 pub struct PingExecutor;
 
 impl PingExecutor {
@@ -46,9 +64,12 @@ impl PingExecutor {
         if let Ok(ip) = target.parse::<IpAddr>() {
             return Some(ip);
         }
-        
+
+        // Sanitize hostname input
+        let sanitized = sanitize_hostname(target)?;
+
         // Try resolving as hostname
-        match tokio::net::lookup_host(&format!("{target}:80")).await {
+        match tokio::net::lookup_host(&format!("{sanitized}:80")).await {
             Ok(mut addrs) => addrs.next().map(|addr| addr.ip()),
             Err(_) => None,
         }
