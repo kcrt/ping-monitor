@@ -23,11 +23,19 @@ A cross-platform GUI network monitoring application built with Rust and egui tha
 
 ## Installation
 
-### Prerequisites
+### Homebrew (macOS/Linux)
+The easiest way to install PingMonitor is via Homebrew:
+```bash
+brew install kcrt/homebrew-kcrt/ping-monitor
+```
+
+### Building from Source
+
+#### Prerequisites
 - Rust 1.70+ (2024 edition)
 - Cargo package manager
 
-### Building from Source
+#### Build Steps
 ```bash
 git clone <repository-url>
 cd ping-monitor
@@ -38,6 +46,14 @@ cargo build --release
 ```bash
 cargo run
 ```
+
+## macOS Gatekeeper Warning
+
+When you first run PingMonitor on macOS, you may see a warning that the app cannot be opened because macOS cannot verify the safety of this application. This is because the app is code-signed (by me) but not notarized by Apple or distributed through the App Store.
+
+To bypass this warning, go to **System Settings > Privacy & Security**, find the message about PingMonitor being blocked, and click **Open Anyway**.
+
+This only needs to be done once. After opening the app this way, macOS will remember your choice and allow it to run normally in the future.
 
 ## Usage
 
