@@ -50,12 +50,50 @@ impl CircleColor {
         )
     }
 
-    pub fn from_ping_response(response_time_ms: Option<f64>, green_threshold: u64, yellow_threshold: u64) -> Self {
+    pub fn from_ping_response(response_time_ms: Option<f64>, thresholds: Thresholds) -> Self {
         match response_time_ms {
-            Some(time) if time < green_threshold as f64 => CircleColor::Green,
-            Some(time) if time < yellow_threshold as f64 => CircleColor::Yellow,
+            Some(time) if time < thresholds.green_ms() as f64 => CircleColor::Green,
+            Some(time) if time < thresholds.yellow_ms() as f64 => CircleColor::Yellow,
             Some(_) => CircleColor::Orange,
             None => CircleColor::Red,
         }
+    }
+}
+
+/// Response time thresholds (in milliseconds) that decide the circle color.
+///
+/// The invariant `green_ms <= yellow_ms` is enforced by the constructor: if it
+/// were violated, `CircleColor::from_ping_response` would never return
+/// `Yellow` or `Orange`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Thresholds {
+    green_ms: u64,
+    yellow_ms: u64,
+}
+
+impl Thresholds {
+    pub const MIN_MS: u64 = 1;
+    pub const MAX_MS: u64 = 2000;
+
+    /// Creates thresholds, clamping the values so that `green_ms <= yellow_ms`
+    /// and both stay inside `MIN_MS..=MAX_MS`.
+    pub fn new(green_ms: u64, yellow_ms: u64) -> Self {
+        let green_ms = green_ms.clamp(Self::MIN_MS, Self::MAX_MS);
+        let yellow_ms = yellow_ms.clamp(green_ms, Self::MAX_MS);
+        Self { green_ms, yellow_ms }
+    }
+
+    pub fn green_ms(self) -> u64 {
+        self.green_ms
+    }
+
+    pub fn yellow_ms(self) -> u64 {
+        self.yellow_ms
+    }
+}
+
+impl Default for Thresholds {
+    fn default() -> Self {
+        Self::new(100, 200)
     }
 }

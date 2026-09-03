@@ -14,7 +14,7 @@ use config::AppConfig;
 use ping::{PingResult, PingStatistics};
 use dns_cache::{DnsCache, DnsCacheEntry};
 use ping_executor::PingExecutor;
-use circle_color::CircleColor;
+use circle_color::{CircleColor, Thresholds};
 
 // Constants
 const PING_INTERVAL_SECS: u64 = 5;
@@ -36,8 +36,7 @@ pub struct PingMonitorApp {
     pub ping_sender: Option<mpsc::Sender<PingResult>>,
     pub pending_pings: HashMap<usize, SystemTime>,
     pub dns_cache: DnsCache,
-    pub green_threshold: u64,
-    pub yellow_threshold: u64,
+    pub thresholds: Thresholds,
     pub last_response_time: Option<f64>,
 }
 
@@ -57,8 +56,7 @@ impl Default for PingMonitorApp {
             ping_sender: None,
             pending_pings: HashMap::new(),
             dns_cache: DnsCache::new(),
-            green_threshold: 100,
-            yellow_threshold: 200,
+            thresholds: Thresholds::default(),
             last_response_time: None,
         }
     }
@@ -67,6 +65,7 @@ impl Default for PingMonitorApp {
 impl PingMonitorApp {
     pub fn new() -> Self {
         let config = AppConfig::load();
+        let thresholds = config.thresholds();
         Self {
             target: config.target,
             is_monitoring: false,
@@ -79,18 +78,13 @@ impl PingMonitorApp {
             ping_sender: None,
             pending_pings: HashMap::new(),
             dns_cache: DnsCache::new(),
-            green_threshold: config.green_threshold,
-            yellow_threshold: config.yellow_threshold,
+            thresholds,
             last_response_time: None,
         }
     }
 
     fn save_config(&self) {
-        let config = AppConfig {
-            target: self.target.clone(),
-            green_threshold: self.green_threshold,
-            yellow_threshold: self.yellow_threshold,
-        };
+        let config = AppConfig::new(self.target.clone(), self.thresholds);
 
         if let Err(e) = config.save() {
             eprintln!("Failed to save config: {e}");
@@ -102,11 +96,7 @@ impl PingMonitorApp {
             return CircleColor::Red;
         }
         
-        CircleColor::from_ping_response(
-            ping_result.response_time,
-            self.green_threshold,
-            self.yellow_threshold
-        )
+        CircleColor::from_ping_response(ping_result.response_time, self.thresholds)
     }
 
     fn update_statistics(&mut self) {
@@ -218,8 +208,7 @@ impl PingMonitorApp {
 impl eframe::App for PingMonitorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let previous_target = self.target.clone();
-        let previous_green = self.green_threshold;
-        let previous_yellow = self.yellow_threshold;
+        let previous_thresholds = self.thresholds;
         
         // Process incoming ping results
         self.process_ping_results();
@@ -236,7 +225,7 @@ impl eframe::App for PingMonitorApp {
         self.render_ui(ctx);
         
         // Save config if changed
-        if previous_target != self.target || previous_green != self.green_threshold || previous_yellow != self.yellow_threshold {
+        if previous_target != self.target || previous_thresholds != self.thresholds {
             self.save_config();
         }
         
@@ -364,16 +353,22 @@ impl PingMonitorApp {
     }
 
     fn render_threshold_controls(&mut self, ui: &mut egui::Ui) {
+        // Edit through local copies so the ranges keep green <= yellow while dragging.
+        let mut green_ms = self.thresholds.green_ms();
+        let mut yellow_ms = self.thresholds.yellow_ms();
+
         ui.label("Time Thresholds:");
         ui.horizontal(|ui| {
             ui.label("Green < ");
-            ui.add(egui::DragValue::new(&mut self.green_threshold).range(1..=1000));
+            ui.add(egui::DragValue::new(&mut green_ms).range(Thresholds::MIN_MS..=yellow_ms));
             ui.label("[ms]");
             ui.label("≤ Yellow <");
-            ui.add(egui::DragValue::new(&mut self.yellow_threshold).range(1..=2000));
+            ui.add(egui::DragValue::new(&mut yellow_ms).range(green_ms..=Thresholds::MAX_MS));
             ui.label("[ms]");
             ui.label("≤ Orange");
         });
+
+        self.thresholds = Thresholds::new(green_ms, yellow_ms);
     }
 
     fn render_control_buttons(&mut self, ui: &mut egui::Ui) {

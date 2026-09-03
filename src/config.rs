@@ -2,6 +2,8 @@ use std::path::PathBuf;
 use std::fs;
 use serde::{Deserialize, Serialize};
 
+use crate::circle_color::Thresholds;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AppConfig {
     pub target: String,
@@ -11,15 +13,25 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        Self {
-            target: "8.8.8.8".to_string(),
-            green_threshold: 100,
-            yellow_threshold: 200,
-        }
+        Self::new("8.8.8.8".to_string(), Thresholds::default())
     }
 }
 
 impl AppConfig {
+    pub fn new(target: String, thresholds: Thresholds) -> Self {
+        Self {
+            target,
+            green_threshold: thresholds.green_ms(),
+            yellow_threshold: thresholds.yellow_ms(),
+        }
+    }
+
+    /// Thresholds from the config file, normalized so that green <= yellow
+    /// even if the file was edited by hand.
+    pub fn thresholds(&self) -> Thresholds {
+        Thresholds::new(self.green_threshold, self.yellow_threshold)
+    }
+
     pub fn get_config_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
         let config_dir = dirs::config_dir()
             .ok_or("Could not find config directory")?
