@@ -13,6 +13,8 @@ pub enum PingError {
     Timeout,
     /// The echo request could not be sent, or the reply was malformed.
     Network(String),
+    /// The background Tokio runtime could not be started.
+    RuntimeInit(String),
 }
 
 impl fmt::Display for PingError {
@@ -22,6 +24,7 @@ impl fmt::Display for PingError {
             PingError::SocketCreation(detail) => write!(f, "ICMP socket creation failed: {detail}"),
             PingError::Timeout => write!(f, "Request timed out"),
             PingError::Network(detail) => write!(f, "Network error: {detail}"),
+            PingError::RuntimeInit(detail) => write!(f, "Ping runtime failed to start: {detail}"),
         }
     }
 }

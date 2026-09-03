@@ -1,7 +1,7 @@
 mod config;
 mod ping;
 mod dns_cache;
-mod ping_executor;
+mod ping_worker;
 mod circle_color;
 
 use std::collections::{VecDeque, HashMap};
@@ -14,7 +14,7 @@ use std::sync::mpsc;
 use config::AppConfig;
 use ping::{PingError, PingResult, PingStatistics};
 use dns_cache::{DnsCache, DnsCacheEntry};
-use ping_executor::PingExecutor;
+use ping_worker::PingWorker;
 use circle_color::{CircleColor, Thresholds};
 
 // Constants
@@ -34,7 +34,7 @@ pub struct PingMonitorApp {
     pub last_ping_second: Option<u64>,
     pub ping_statistics: PingStatistics,
     pub ping_receiver: Option<mpsc::Receiver<PingResult>>,
-    pub ping_sender: Option<mpsc::Sender<PingResult>>,
+    pub ping_worker: Option<PingWorker>,
     pub pending_pings: HashMap<usize, SystemTime>,
     pub dns_cache: DnsCache,
     pub thresholds: Thresholds,
@@ -56,7 +56,7 @@ impl Default for PingMonitorApp {
             last_ping_second: None,
             ping_statistics: PingStatistics::default(),
             ping_receiver: None,
-            ping_sender: None,
+            ping_worker: None,
             pending_pings: HashMap::new(),
             dns_cache: DnsCache::new(),
             thresholds: Thresholds::default(),
@@ -79,7 +79,7 @@ impl PingMonitorApp {
             last_ping_second: None,
             ping_statistics: PingStatistics::default(),
             ping_receiver: None,
-            ping_sender: None,
+            ping_worker: None,
             pending_pings: HashMap::new(),
             dns_cache: DnsCache::new(),
             thresholds,
@@ -308,26 +308,25 @@ impl PingMonitorApp {
             return;
         }
 
-        // Initialize channel if needed
-        if self.ping_receiver.is_none() {
+        // Start the worker thread on the first ping
+        if self.ping_worker.is_none() {
             let (sender, receiver) = mpsc::channel();
             self.ping_receiver = Some(receiver);
-            self.ping_sender = Some(sender);
+            self.ping_worker = Some(PingWorker::spawn(sender));
         }
-        
-        if let Some(sender) = &self.ping_sender {
+
+        if let Some(worker) = &self.ping_worker {
             let target = self.target.clone();
-            let sender_clone = sender.clone();
-            
+
             // Check for valid cached IP
             if let Some(cached_ip) = self.dns_cache.get_valid_ip(&target) {
-                PingExecutor::ping_with_ip(cached_ip, sender_clone);
+                worker.ping_with_ip(cached_ip, now);
             } else {
                 // Clean expired cache and resolve
                 self.dns_cache.clean_expired(&target);
-                PingExecutor::resolve_and_ping(target, sender_clone);
+                worker.resolve_and_ping(target, now);
             }
-            
+
             self.pending_pings.insert(circle_index, now);
             self.last_ping_second = Some(current_5sec_boundary);
         }
