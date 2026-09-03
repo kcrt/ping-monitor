@@ -5,7 +5,7 @@ use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use surge_ping::{Client, Config, IcmpPacket, PingIdentifier, PingSequence, SurgeError};
+use surge_ping::{Client, Config, ICMP, IcmpPacket, PingIdentifier, PingSequence, SurgeError};
 use tokio::sync::OnceCell;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -114,7 +114,9 @@ fn run_worker(mut commands: UnboundedReceiver<PingCommand>, results: Sender<Ping
 
 /// Shared ICMP state that outlives a single ping
 struct PingSession {
-    client: OnceCell<Client>,
+    /// One client per address family: a socket only handles its own ICMP kind
+    client_v4: OnceCell<Client>,
+    client_v6: OnceCell<Client>,
     /// Identifies our echo requests among those of other processes
     identifier: PingIdentifier,
     next_sequence: AtomicU16,
@@ -123,7 +125,8 @@ struct PingSession {
 impl Default for PingSession {
     fn default() -> Self {
         Self {
-            client: OnceCell::new(),
+            client_v4: OnceCell::new(),
+            client_v6: OnceCell::new(),
             identifier: PingIdentifier(std::process::id() as u16),
             next_sequence: AtomicU16::new(0),
         }
@@ -154,7 +157,7 @@ impl PingSession {
             },
         };
 
-        let client = match self.client().await {
+        let client = match self.client(target_ip).await {
             Ok(client) => client,
             Err(e) => {
                 log::warn!("failed to create ICMP socket: {e}");
@@ -183,9 +186,14 @@ impl PingSession {
     ///
     /// The client must never be cloned out of the cell: dropping any clone
     /// tears down the reply dispatcher shared by all of them.
-    async fn client(&self) -> std::io::Result<&Client> {
-        self.client
-            .get_or_try_init(|| async { Client::new(&Config::default()) })
+    async fn client(&self, target_ip: IpAddr) -> std::io::Result<&Client> {
+        let (client, kind) = match target_ip {
+            IpAddr::V4(_) => (&self.client_v4, ICMP::V4),
+            IpAddr::V6(_) => (&self.client_v6, ICMP::V6),
+        };
+
+        client
+            .get_or_try_init(|| async { Client::new(&Config::builder().kind(kind).build()) })
             .await
     }
 }
@@ -246,6 +254,22 @@ mod tests {
         worker.ping_with_ip(localhost, SystemTime::now());
         let second = receiver.recv_timeout(RESULT_TIMEOUT).expect("no second result");
         assert!(second.success, "second ping failed: {:?}", second.error);
+    }
+
+    /// An IPv6 target needs an IPv6 socket; a v4-only client cannot reach it.
+    #[test]
+    fn worker_pings_ipv6_targets() {
+        let (sender, receiver) = channel();
+        let worker = PingWorker::spawn(sender);
+
+        worker.ping_with_ip(IpAddr::from([0, 0, 0, 0, 0, 0, 0, 1]), SystemTime::now());
+        let result = receiver.recv_timeout(RESULT_TIMEOUT).expect("no result");
+        if matches!(result.error, Some(PingError::SocketCreation(_))) {
+            eprintln!("skipping: {}", result.error.unwrap());
+            return;
+        }
+
+        assert!(result.success, "ping to ::1 failed: {:?}", result.error);
     }
 
     #[test]
