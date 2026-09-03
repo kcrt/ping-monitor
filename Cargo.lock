@@ -2579,6 +2579,7 @@ dependencies = [
  "egui",
  "env_logger",
  "image 0.24.9",
+ "log",
  "serde",
  "serde_json",
  "surge-ping",

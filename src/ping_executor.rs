@@ -2,8 +2,8 @@ use std::net::IpAddr;
 use std::time::{Duration, SystemTime};
 use std::sync::mpsc;
 use std::thread;
-use surge_ping::{Client, Config, IcmpPacket, PingIdentifier, PingSequence};
-use crate::ping::PingResult;
+use surge_ping::{Client, Config, IcmpPacket, PingIdentifier, PingSequence, SurgeError};
+use crate::ping::{PingError, PingResult};
 
 const PING_TIMEOUT_SECS: u64 = 5;
 
@@ -37,7 +37,10 @@ impl PingExecutor {
             let result = rt.block_on(async {
                 let target_ip = match Self::resolve_target(&target).await {
                     Some(ip) => ip,
-                    None => return PingResult::failure(timestamp),
+                    None => {
+                        log::warn!("failed to resolve target '{target}'");
+                        return PingResult::failure(timestamp, PingError::DnsResolution);
+                    }
                 };
 
                 Self::execute_ping(target_ip, timestamp, Some(target)).await
@@ -84,7 +87,10 @@ impl PingExecutor {
         let config = Config::default();
         let client = match Client::new(&config) {
             Ok(client) => client,
-            Err(_) => return PingResult::failure(timestamp),
+            Err(e) => {
+                log::warn!("failed to create ICMP socket: {e}");
+                return PingResult::failure(timestamp, PingError::SocketCreation(e.to_string()));
+            }
         };
         
         let mut pinger = client.pinger(target_ip, PingIdentifier(1)).await;
@@ -96,7 +102,18 @@ impl PingExecutor {
                 let resolved_ip = hostname.map(|h| (h, target_ip));
                 PingResult::success(timestamp, response_time_ms, resolved_ip)
             }
-            Err(_) => PingResult::failure(timestamp),
+            Err(e) => {
+                log::warn!("ping to {target_ip} failed: {e}");
+                PingResult::failure(timestamp, Self::classify_error(e))
+            }
+        }
+    }
+
+    /// Map a surge-ping error to the reason shown in the UI
+    fn classify_error(error: SurgeError) -> PingError {
+        match error {
+            SurgeError::Timeout { .. } => PingError::Timeout,
+            other => PingError::Network(other.to_string()),
         }
     }
 }

@@ -6,12 +6,13 @@ mod circle_color;
 
 use std::collections::{VecDeque, HashMap};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use chrono::{DateTime, Local};
 use eframe::egui;
 use egui::{Color32, Vec2, Pos2, Stroke};
 use std::sync::mpsc;
 
 use config::AppConfig;
-use ping::{PingResult, PingStatistics};
+use ping::{PingError, PingResult, PingStatistics};
 use dns_cache::{DnsCache, DnsCacheEntry};
 use ping_executor::PingExecutor;
 use circle_color::{CircleColor, Thresholds};
@@ -38,6 +39,8 @@ pub struct PingMonitorApp {
     pub dns_cache: DnsCache,
     pub thresholds: Thresholds,
     pub last_response_time: Option<f64>,
+    /// Most recent failure reason together with the time it happened
+    pub last_error: Option<(SystemTime, PingError)>,
 }
 
 
@@ -58,6 +61,7 @@ impl Default for PingMonitorApp {
             dns_cache: DnsCache::new(),
             thresholds: Thresholds::default(),
             last_response_time: None,
+            last_error: None,
         }
     }
 }
@@ -80,6 +84,7 @@ impl PingMonitorApp {
             dns_cache: DnsCache::new(),
             thresholds,
             last_response_time: None,
+            last_error: None,
         }
     }
 
@@ -248,6 +253,10 @@ impl PingMonitorApp {
             self.circle_timestamps[circle_index] = Some(ping_result.timestamp);
             
             self.last_response_time = ping_result.response_time;
+
+            if let Some(error) = &ping_result.error {
+                self.last_error = Some((ping_result.timestamp, error.clone()));
+            }
             
             // Update DNS cache if we have resolution info
             if let Some((hostname, ip)) = &ping_result.resolved_ip {
@@ -392,5 +401,12 @@ impl PingMonitorApp {
                 None => "N/A".to_string(),
             }
         ));
+        ui.label(match &self.last_error {
+            Some((timestamp, error)) => {
+                let time = DateTime::<Local>::from(*timestamp).format("%H:%M:%S");
+                format!("Last Error: {error} ({time})")
+            }
+            None => "Last Error: none".to_string(),
+        });
     }
 }

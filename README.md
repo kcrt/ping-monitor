@@ -96,6 +96,7 @@ This only needs to be done once. After opening the app this way, macOS will reme
 - **serde/serde_json**: Configuration serialization
 - **dirs**: Platform-specific directory paths
 - **tokio**: Async runtime (full features)
+- **log/env_logger**: Diagnostic logging (set `RUST_LOG=warn` to see ping failure reasons)
 
 ## Build Commands
 
