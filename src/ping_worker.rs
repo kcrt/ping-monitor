@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -11,8 +12,6 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use crate::ping::{PingError, PingResult};
 
 const PING_TIMEOUT_SECS: u64 = 5;
-const PING_IDENTIFIER: PingIdentifier = PingIdentifier(1);
-const PING_SEQUENCE: PingSequence = PingSequence(1);
 
 /// Sanitize hostname by keeping only valid characters (alphanumeric, dots, hyphens)
 /// Returns None if the result is empty
@@ -114,12 +113,33 @@ fn run_worker(mut commands: UnboundedReceiver<PingCommand>, results: Sender<Ping
 }
 
 /// Shared ICMP state that outlives a single ping
-#[derive(Default)]
 struct PingSession {
     client: OnceCell<Client>,
+    /// Identifies our echo requests among those of other processes
+    identifier: PingIdentifier,
+    next_sequence: AtomicU16,
+}
+
+impl Default for PingSession {
+    fn default() -> Self {
+        Self {
+            client: OnceCell::new(),
+            identifier: PingIdentifier(std::process::id() as u16),
+            next_sequence: AtomicU16::new(0),
+        }
+    }
 }
 
 impl PingSession {
+    /// Sequence number for the next echo request, wrapping around at u16::MAX.
+    ///
+    /// Replies are matched by (host, identifier, sequence), so reusing a number
+    /// would let a late reply of a timed out ping be taken for the answer of the
+    /// current one - reporting a response time that was never measured.
+    fn next_sequence(&self) -> PingSequence {
+        PingSequence(self.next_sequence.fetch_add(1, Ordering::Relaxed))
+    }
+
     async fn execute(&self, command: PingCommand) -> PingResult {
         let timestamp = command.timestamp;
 
@@ -142,10 +162,10 @@ impl PingSession {
             }
         };
 
-        let mut pinger = client.pinger(target_ip, PING_IDENTIFIER).await;
+        let mut pinger = client.pinger(target_ip, self.identifier).await;
         pinger.timeout(Duration::from_secs(PING_TIMEOUT_SECS));
 
-        match pinger.ping(PING_SEQUENCE, &[]).await {
+        match pinger.ping(self.next_sequence(), &[]).await {
             Ok((IcmpPacket::V4(_), duration)) | Ok((IcmpPacket::V6(_), duration)) => {
                 let response_time_ms = duration.as_secs_f64() * 1000.0;
                 let resolved_ip = hostname.map(|h| (h, target_ip));
@@ -226,5 +246,13 @@ mod tests {
         worker.ping_with_ip(localhost, SystemTime::now());
         let second = receiver.recv_timeout(RESULT_TIMEOUT).expect("no second result");
         assert!(second.success, "second ping failed: {:?}", second.error);
+    }
+
+    #[test]
+    fn sequence_numbers_are_not_reused() {
+        let session = PingSession::default();
+        let sequences: Vec<PingSequence> = (0..3).map(|_| session.next_sequence()).collect();
+
+        assert_eq!(sequences, vec![PingSequence(0), PingSequence(1), PingSequence(2)]);
     }
 }
