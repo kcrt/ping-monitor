@@ -94,7 +94,10 @@ jobs:
       
       - name: Install cargo-bundle
         if: ${{ !matrix.use_cross && runner.os == 'macOS' }}
-        run: cargo install cargo-bundle
+        # --locked uses the lockfile shipped with cargo-bundle: without it,
+        # dependency resolution picks up versions that fail to build (e.g.
+        # tinyvec 1.13.0 on Rust 1.98).
+        run: cargo install cargo-bundle --locked
       
       - name: Cache cross installation
         if: matrix.use_cross
